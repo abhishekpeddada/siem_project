@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Flask SIEM with YARA rule support.
+Flask SIEM with YARA rule support — fixed and debug-friendly single-file app.
 
 - Put .yar files into ./rules/
 - Logs go to ./logs/ (one event per line)
 - POST /ingest to ingest current files
 - POST /rules/reload to recompile YARA rules
+- GET /_debug_status to inspect YARA, logs and alerts counts
 """
 import os
 import re
@@ -15,34 +16,39 @@ import hashlib
 import datetime
 import yara
 import requests
-
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for
-from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 
-# --- config
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, make_response
+from flask_sqlalchemy import SQLAlchemy
+
+# --------------------
+# Config
+# --------------------
 load_dotenv()
 STORAGE_PATH = os.getenv('STORAGE_PATH', './logs')
 RULES_DIR = os.path.join(os.path.dirname(__file__), 'rules')
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
 DB_PATH = os.path.join(os.path.dirname(__file__), 'siem.db')
 
-# --- flask & db
+# --------------------
+# Flask & DB
+# --------------------
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DB_PATH}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# --- models
+# --------------------
+# DB Models
+# --------------------
 class Log(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    raw = db.Column(db.Text, nullable=False, unique=False)
+    raw = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, nullable=True)
-    udm = db.Column(db.Text)  # json string
+    udm = db.Column(db.Text)  # JSON string
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
 class Rule(db.Model):
-    # optional DB mapping; YARA file-first approach doesn't rely on this
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200))
     pattern = db.Column(db.Text)
@@ -73,16 +79,20 @@ class Playbook(db.Model):
     steps = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-# initialize DB (create tables) — run inside an application context
+# create tables inside app context
 with app.app_context():
     db.create_all()
 
-# --- utilities
+# --------------------
+# Utilities
+# --------------------
 def md5hex(s: str):
     return hashlib.md5(s.encode('utf-8')).hexdigest()
 
 def parse_udm(raw: str):
+    """Try JSON, then key=value pairs, then simple timestamp prefix, else raw message dict."""
     raw = raw.strip()
+    # try json
     try:
         return json.loads(raw)
     except Exception:
@@ -91,34 +101,42 @@ def parse_udm(raw: str):
     kvpairs = re.findall(r"(\w+)=([\"']?[^ \"]+[\"']?)", raw)
     if kvpairs:
         kv = {}
-        for k,v in kvpairs:
-            kv[k] = v.strip('"')
+        for k, v in kvpairs:
+            kv[k] = v.strip('"').strip("'")
         return kv
-    # syslog-ish
+    # timestamp prefix "YYYY-MM-DD HH:MM:SS rest..."
     m = re.match(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?P<rest>.*)$", raw)
     if m:
         return {"timestamp": m.group('ts'), "message": m.group('rest')}
     return {"message": raw}
 
-# --- YARA rules
+# --------------------
+# YARA rule management
+# --------------------
 COMPILED_RULES = None
+LAST_YARA_ERROR = None
 
 def compile_yara_rules():
-    global COMPILED_RULES
+    """Compile all .yar / .yara files from RULES_DIR. Store last error for debug."""
+    global COMPILED_RULES, LAST_YARA_ERROR
     os.makedirs(RULES_DIR, exist_ok=True)
-    rule_files = glob.glob(os.path.join(RULES_DIR, '*.yar')) + glob.glob(os.path.join(RULES_DIR, '*.yara'))
+    rule_files = sorted(glob.glob(os.path.join(RULES_DIR, '*.yar')) + glob.glob(os.path.join(RULES_DIR, '*.yara')))
     if not rule_files:
         COMPILED_RULES = None
+        LAST_YARA_ERROR = None
         app.logger.info("No YARA files found in rules/")
         return
     filedict = {f"r{idx}": path for idx, path in enumerate(rule_files)}
     try:
         COMPILED_RULES = yara.compile(filepaths=filedict)
+        LAST_YARA_ERROR = None
         app.logger.info(f"Compiled {len(filedict)} yara files.")
     except yara.Error as e:
         COMPILED_RULES = None
+        LAST_YARA_ERROR = str(e)
         app.logger.error("YARA compile failed: %s", e)
 
+# initial compile
 compile_yara_rules()
 
 @app.route('/rules/reload', methods=['POST'])
@@ -126,29 +144,40 @@ def reload_rules():
     compile_yara_rules()
     return jsonify({'ok': True})
 
-# --- detection core using YARA
+# --------------------
+# Detection core (YARA-based)
+# --------------------
 def apply_yara_rules_to_log(log: Log):
+    """Apply compiled YARA rules to a Log record. Create/update alerts based on threshold/window/group_by_regex."""
     global COMPILED_RULES
     if not COMPILED_RULES:
         return []
+
     matched = []
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.datetime.utcnow()
     try:
         matches = COMPILED_RULES.match(data=log.raw)
     except Exception as e:
         app.logger.error("YARA match error: %s", e)
         return []
+
     for m in matches:
         rule_name = m.rule
         meta = getattr(m, 'meta', {}) or {}
         strings = getattr(m, 'strings', []) or []
 
-        threshold = int(meta.get('threshold', 1))
-        window = int(meta.get('window_seconds', 60))
+        try:
+            threshold = int(meta.get('threshold', 1))
+        except Exception:
+            threshold = 1
+        try:
+            window = int(meta.get('window_seconds', 60))
+        except Exception:
+            window = 60
         group_by_regex = meta.get('group_by_regex')
 
+        # Determine signature key (grouping)
         sig = None
-        # group_by_regex
         if group_by_regex:
             try:
                 rg = re.compile(group_by_regex)
@@ -158,20 +187,29 @@ def apply_yara_rules_to_log(log: Log):
             except Exception:
                 pass
 
-        # fallback: try strings for IP/email
+        # fallback: use strings matched content to derive IP/email if possible
         if not sig:
             for sid, off, sval in strings:
-                s = sval.decode('utf-8') if isinstance(sval, (bytes,bytearray)) else str(sval)
-                ipm = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', s)
+                s = sval.decode('utf-8') if isinstance(sval, (bytes, bytearray)) else str(sval)
+                ipm = re.search(r'([0-9]{1,3}(?:\.[0-9]{1,3}){3})', s)
                 if ipm:
-                    sig = ipm.group(1); break
+                    sig = ipm.group(1)
+                    break
                 em = re.search(r'([\w\.-]+@[\w\.-]+)', s)
                 if em:
-                    sig = em.group(1); break
+                    sig = em.group(1)
+                    break
 
+        # If no grouping key, use first 16 chars of hash of raw
+        if not sig:
+            sig = md5hex(log.raw)[:16]
+
+        # Build signature string
+        signature_key = f"yara:{rule_name}|{sig}"
+        signature = md5hex(signature_key)
+
+        # Simple threshold logic: if threshold <=1 create/update immediately
         if threshold <= 1:
-            signature_key = f"yara:{rule_name}|{sig or md5hex(log.raw)[:16]}"
-            signature = md5hex(signature_key)
             alert = Alert.query.filter_by(signature=signature).first()
             if alert:
                 alert.count += 1
@@ -181,33 +219,37 @@ def apply_yara_rules_to_log(log: Log):
             else:
                 alert = Alert(rule_id=None, signature=signature, count=1,
                               first_seen=now, last_seen=now, sample_log_id=log.id)
-                db.session.add(alert); db.session.commit()
-                db.session.add(AlertLog(alert_id=alert.id, log_id=log.id)); db.session.commit()
-            matched.append({'rule': rule_name, 'alert_id': alert.id})
+                db.session.add(alert)
+                db.session.commit()
+                db.session.add(AlertLog(alert_id=alert.id, log_id=log.id))
+                db.session.commit()
+            matched.append({'rule': rule_name, 'alert_id': alert.id, 'reason': 'single'})
             continue
 
-        # threshold > 1: count recent matching logs
+        # threshold > 1: count recent matching logs in window
         window_start = now - datetime.timedelta(seconds=window)
         recent_q = Log.query.filter(Log.created_at >= window_start).order_by(Log.created_at.desc()).all()
         recent_count = 0
         for rl in recent_q:
             try:
+                # if the rule matches the recent log
                 if COMPILED_RULES.match(data=rl.raw):
-                    if sig:
-                        if group_by_regex:
-                            mm = re.search(group_by_regex, rl.raw)
-                            if not mm or (mm.group(1) != sig):
-                                continue
-                        else:
-                            if sig not in rl.raw:
-                                continue
+                    # if group_by_regex provided, ensure the same sig
+                    if group_by_regex:
+                        mm = re.search(group_by_regex, rl.raw)
+                        if not mm:
+                            continue
+                        val = mm.group(1) if mm.groups() >= 1 else mm.group(0)
+                        if val != sig:
+                            continue
+                    else:
+                        if sig not in rl.raw:
+                            continue
                     recent_count += 1
             except Exception:
                 continue
 
         if recent_count >= threshold:
-            signature_key = f"yara:{rule_name}|{sig or md5hex(log.raw)[:16]}"
-            signature = md5hex(signature_key)
             alert = Alert.query.filter_by(signature=signature).first()
             if alert:
                 alert.count += 1
@@ -217,73 +259,125 @@ def apply_yara_rules_to_log(log: Log):
             else:
                 alert = Alert(rule_id=None, signature=signature, count=1,
                               first_seen=now, last_seen=now, sample_log_id=log.id)
-                db.session.add(alert); db.session.commit()
-                db.session.add(AlertLog(alert_id=alert.id, log_id=log.id)); db.session.commit()
+                db.session.add(alert)
+                db.session.commit()
+                db.session.add(AlertLog(alert_id=alert.id, log_id=log.id))
+                db.session.commit()
             matched.append({'rule': rule_name, 'alert_id': alert.id, 'reason': f'{recent_count}/{threshold}'})
         else:
             matched.append({'rule': rule_name, 'alert_id': None, 'reason': f'waiting {recent_count}/{threshold}'})
+
     return matched
 
-# --- ingestion
-@app.route('/ingest', methods=['GET','POST'])
+# --------------------
+# Ingestion
+# --------------------
+@app.route('/ingest', methods=['GET', 'POST'])
 def ingest():
+    """
+    GET: returns count of files
+    POST: ingest all files in STORAGE_PATH line-by-line (skip exact duplicates)
+    """
     if request.method == 'GET':
         files = []
         if os.path.isdir(STORAGE_PATH):
             files = os.listdir(STORAGE_PATH)
         return jsonify({'storage_path': STORAGE_PATH, 'file_count': len(files)})
+
     processed = 0
     os.makedirs(STORAGE_PATH, exist_ok=True)
-    for fname in os.listdir(STORAGE_PATH):
+    for fname in sorted(os.listdir(STORAGE_PATH)):
         fpath = os.path.join(STORAGE_PATH, fname)
-        if os.path.isfile(fpath):
+        if not os.path.isfile(fpath):
+            continue
+        try:
             with open(fpath, 'r', encoding='utf-8', errors='ignore') as fh:
                 for line in fh:
                     raw = line.strip()
-                    if not raw: continue
-                    # skip exact duplicates
+                    if not raw:
+                        continue
+                    # skip if exact raw already exists
                     if Log.query.filter_by(raw=raw).first():
                         continue
                     udm = parse_udm(raw)
                     ts = None
                     if isinstance(udm, dict) and 'timestamp' in udm:
                         try:
-                            ts = datetime.datetime.fromisoformat(udm['timestamp'])
+                            ts = datetime.datetime.datetime.fromisoformat(udm['timestamp'])
                         except Exception:
-                            # try common format
                             try:
-                                ts = datetime.datetime.strptime(udm['timestamp'], '%Y-%m-%d %H:%M:%S')
+                                ts = datetime.datetime.datetime.strptime(udm['timestamp'], '%Y-%m-%d %H:%M:%S')
                             except Exception:
                                 ts = None
                     log = Log(raw=raw, timestamp=ts, udm=json.dumps(udm))
                     db.session.add(log)
                     db.session.commit()
-                    # detection via YARA
+                    # apply detection
                     apply_yara_rules_to_log(log)
                     processed += 1
+        except Exception as e:
+            app.logger.error("Error reading file %s: %s", fpath, e)
+            continue
+
     return jsonify({'processed': processed})
 
-# --- UI templates (very small)
+# --------------------
+# Debug/status endpoint
+# --------------------
+@app.route('/_debug_status')
+def debug_status():
+    yar_count = len(glob.glob(os.path.join(RULES_DIR, '*.yar'))) + len(glob.glob(os.path.join(RULES_DIR, '*.yara')))
+    logs_count = 0
+    if os.path.isdir(STORAGE_PATH):
+        for f in os.listdir(STORAGE_PATH):
+            p = os.path.join(STORAGE_PATH, f)
+            if os.path.isfile(p):
+                try:
+                    with open(p, 'r', errors='ignore') as fh:
+                        logs_count += sum(1 for _ in fh)
+                except Exception:
+                    pass
+    alerts_count = Alert.query.count()
+    return jsonify({
+        "yara_compiled": bool(COMPILED_RULES),
+        "yar_files": yar_count,
+        "logs_lines": logs_count,
+        "alerts": alerts_count,
+        "last_yara_error": LAST_YARA_ERROR
+    })
+
+# --------------------
+# UI (small)
+# --------------------
 base_tpl = '''
 <!doctype html>
 <html>
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <title>Flask SIEM</title>
-</head>
-<body>
-<nav class="navbar navbar-dark bg-dark">
-  <div class="container-fluid">
-    <a class="navbar-brand" href="/">FlaskSIEM</a>
-    <div>
-      <a class="btn btn-sm btn-secondary" href="/rules/reload" onclick="event.preventDefault(); fetch('/rules/reload',{method:'POST'}).then(()=>location.reload())">Reload YARA</a>
-      <a class="btn btn-sm btn-light" href="/ingest" onclick="event.preventDefault(); fetch('/ingest',{method:'POST'}).then(()=>location.reload())">Ingest</a>
-    </div>
-  </div>
-</nav>
-<div class="container mt-3">{{ content }}</div>
-</body>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Flask SIEM</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  </head>
+  <body>
+    <nav class="navbar navbar-dark bg-dark mb-3">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="/">FlaskSIEM</a>
+        <div>
+          <button id="reload" class="btn btn-sm btn-secondary">Reload YARA</button>
+          <button id="ingest" class="btn btn-sm btn-light">Ingest</button>
+        </div>
+      </div>
+    </nav>
+    <div class="container">{{ content|safe }}</div>
+    <script>
+      document.getElementById('reload').addEventListener('click', ()=> {
+        fetch('/rules/reload', {method:'POST'}).then(()=>location.reload());
+      });
+      document.getElementById('ingest').addEventListener('click', ()=> {
+        fetch('/ingest', {method:'POST'}).then(()=>location.reload());
+      });
+    </script>
+  </body>
 </html>
 '''
 
@@ -297,7 +391,9 @@ def dashboard():
     <h1>Alerts</h1>
     <table class="table table-striped"><thead><tr><th>ID</th><th>Rule</th><th>Count</th><th>First</th><th>Last</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table>
     '''
-    return render_template_string(base_tpl, content=content)
+    rendered = render_template_string(base_tpl, content=content)
+    # Ensure browser renders HTML
+    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
 
 @app.route('/alert/<int:alert_id>')
 def alert_view(alert_id):
@@ -321,8 +417,12 @@ def alert_view(alert_id):
     <h3>Notes</h3>
     <pre>{a.notes or ''}</pre>
     '''
-    return render_template_string(base_tpl, content=content)
+    rendered = render_template_string(base_tpl, content=content)
+    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
 
+# --------------------
+# AI analysis (existing)
+# --------------------
 @app.route('/analyze/<int:alert_id>', methods=['GET'])
 def analyze(alert_id):
     a = Alert.query.get_or_404(alert_id)
@@ -352,11 +452,15 @@ def analyze(alert_id):
     except Exception as e:
         output = f"Error calling Google API: {e}"
 
-    a.notes = (a.notes or '') + f"\n\n--- Analysis ({datetime.datetime.utcnow().isoformat()}):\n" + output
+    a.notes = (a.notes or '') + f"\n\n--- Analysis ({datetime.datetime.datetime.utcnow().isoformat()}):\n" + output
     db.session.commit()
     content = f"<h2>Analysis for Alert {a.id}</h2><pre>{output}</pre><p><a href='/alert/{a.id}'>Back</a></p>"
-    return render_template_string(base_tpl, content=content)
+    rendered = render_template_string(base_tpl, content=content)
+    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
 
+# --------------------
+# Logs listing & playbooks
+# --------------------
 @app.route('/logs')
 def view_logs():
     q = request.args.get('q')
@@ -372,7 +476,8 @@ def view_logs():
     <form class="mb-3"><input name="q" placeholder="search" class="form-control" value="{request.args.get('q','')}"></form>
     <table class="table"><thead><tr><th>ID</th><th>Raw</th><th>When</th></tr></thead><tbody>{rows}</tbody></table>
     '''
-    return render_template_string(base_tpl, content=content)
+    rendered = render_template_string(base_tpl, content=content)
+    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
 
 @app.route('/playbooks', methods=['GET','POST'])
 def playbooks():
@@ -395,8 +500,12 @@ def playbooks():
     </form>
     <table class="table"><thead><tr><th>ID</th><th>Name</th><th>Steps</th></tr></thead><tbody>{rows}</tbody></table>
     '''
-    return render_template_string(base_tpl, content=content)
+    rendered = render_template_string(base_tpl, content=content)
+    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
 
+# --------------------
+# simple API: add rule entry (kept for compatibility)
+# --------------------
 @app.route('/api/rules', methods=['POST'])
 def api_add_rule():
     data = request.json or {}
@@ -409,7 +518,11 @@ def api_add_rule():
     db.session.add(r); db.session.commit()
     return jsonify({'ok': True, 'id': r.id})
 
+# --------------------
+# Run
+# --------------------
 if __name__ == '__main__':
     os.makedirs(STORAGE_PATH, exist_ok=True)
     os.makedirs(RULES_DIR, exist_ok=True)
+    # run in debug mode for development
     app.run(host='0.0.0.0', port=5000, debug=True)
