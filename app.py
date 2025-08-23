@@ -73,7 +73,9 @@ class Playbook(db.Model):
     steps = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-db.create_all()
+# initialize DB (create tables) — run inside an application context
+with app.app_context():
+    db.create_all()
 
 # --- utilities
 def md5hex(s: str):
