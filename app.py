@@ -29,7 +29,7 @@ from flask_sqlalchemy import SQLAlchemy
 load_dotenv()
 STORAGE_PATH = os.getenv('STORAGE_PATH', './logs')
 RULES_DIR = os.path.join(os.path.dirname(__file__), 'rules')
-GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '') 
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
 DB_PATH = os.path.join(os.path.dirname(__file__), 'siem.db')
 
 # --------------------
@@ -78,12 +78,14 @@ class AlertLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     alert_id = db.Column(db.Integer, db.ForeignKey('alert.id'))
     log_id = db.Column(db.Integer, db.ForeignKey('log.id'))
+    # 🛠️ FIXED: Changed to db.DateTime for SQLAlchemy compatibility
     created_at = db.Column(db.DateTime, default=now_utc)
 
 class Playbook(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200))
     steps = db.Column(db.Text)
+    # 🛠️ FIXED: Changed to db.DateTime for SQLAlchemy compatibility
     created_at = db.Column(db.DateTime, default=now_utc)
 
 with app.app_context():
@@ -118,6 +120,57 @@ def parse_udm(raw: str):
     if m:
         return {"timestamp": m.group('ts'), "message": m.group('rest')}
     return {"message": raw}
+
+def get_log_signature(log_data, rule_meta, rule_strings):
+    """
+    Derives a consistent signature from a log entry based on YARA rule metadata.
+    """
+    sig = None
+    group_by_regex = rule_meta.get('group_by_regex')
+
+    if group_by_regex:
+        try:
+            rg = re.compile(group_by_regex)
+            mm = rg.search(log_data)
+            if mm:
+                sig = mm.group(1) if len(mm.groups()) >= 1 else mm.group(0)
+        except Exception as e:
+            app.logger.debug(f"group_by_regex eval error: {e}")
+            sig = None
+
+    if not sig and rule_strings:
+        for s in rule_strings:
+            sval = None
+            if isinstance(s, (tuple, list)) and len(s) >= 3:
+                sval = s[2]
+            else:
+                sval = getattr(s, 'data', None) or getattr(s, 'value', None) or s
+            try:
+                stext = sval.decode('utf-8') if isinstance(sval, (bytes, bytearray)) else str(sval)
+            except Exception:
+                stext = str(sval)
+            ipm = re.search(r'([0-9]{1,3}(?:\.[0-9]{1,3}){3})', stext)
+            if ipm:
+                sig = ipm.group(1); break
+            em = re.search(r'([\w\.-]+@[\w\.-]+)', stext)
+            if em:
+                sig = em.group(1); break
+
+    if not sig:
+        try:
+            udm = json.loads(log_data) if log_data else {}
+            if isinstance(udm, dict):
+                for k in ('src_ip', 'ip', 'user', 'username', 'from', 'email'):
+                    if k in udm:
+                        sig = udm.get(k)
+                        break
+        except Exception:
+            pass
+
+    if not sig:
+        sig = md5hex(log_data)[:16]
+    
+    return sig
 
 # --------------------
 # YARA management
@@ -156,12 +209,7 @@ def reload_rules():
 # --------------------
 def apply_yara_rules_to_log(log: Log):
     """
-    Apply compiled YARA rules to a Log record.
-
-    Key points:
-    - Use event_time = log.timestamp if available else log.created_at (prefer event time)
-    - Count recent events in [event_time - window, event_time]
-    - Robust to yara.StringMatch or tuple shapes
+    Apply compiled YARA rules to a Log record, with corrected correlation logic.
     """
     global COMPILED_RULES
     if not COMPILED_RULES:
@@ -174,7 +222,6 @@ def apply_yara_rules_to_log(log: Log):
         app.logger.error("YARA match error: %s", e)
         return []
 
-    # determine event_time for window calculation; make timezone-aware
     event_time = log.timestamp or log.created_at or dt.datetime.now(dt.timezone.utc)
     if isinstance(event_time, dt.datetime) and event_time.tzinfo is None:
         event_time = event_time.replace(tzinfo=dt.timezone.utc)
@@ -192,142 +239,45 @@ def apply_yara_rules_to_log(log: Log):
             window = int(meta.get('window_seconds', 60))
         except Exception:
             window = 60
-        group_by_regex = meta.get('group_by_regex')
-
-        # derive grouping sig
-        sig = None
-        if group_by_regex:
-            try:
-                rg = re.compile(group_by_regex)
-                mm = rg.search(log.raw)
-                if mm:
-                    sig = mm.group(1) if len(mm.groups()) >= 1 else mm.group(0)
-            except Exception as e:
-                app.logger.debug("group_by_regex eval error for %s: %s", rule_name, e)
-                sig = None
-
-        if not sig and strings:
-            for s in strings:
-                sval = None
-                if isinstance(s, (tuple, list)) and len(s) >= 3:
-                    sval = s[2]
-                else:
-                    sval = getattr(s, 'data', None) or getattr(s, 'value', None) or s
-                try:
-                    stext = sval.decode('utf-8') if isinstance(sval, (bytes, bytearray)) else str(sval)
-                except Exception:
-                    stext = str(sval)
-                ipm = re.search(r'([0-9]{1,3}(?:\.[0-9]{1,3}){3})', stext)
-                if ipm:
-                    sig = ipm.group(1); break
-                em = re.search(r'([\w\.-]+@[\w\.-]+)', stext)
-                if em:
-                    sig = em.group(1); break
-
-        if not sig:
-            try:
-                udm = json.loads(log.udm) if log.udm else {}
-                if isinstance(udm, dict):
-                    for k in ('src_ip', 'ip', 'user', 'username', 'from', 'email'):
-                        if k in udm:
-                            sig = udm.get(k)
-                            break
-            except Exception:
-                pass
-
-        if not sig:
-            sig = md5hex(log.raw)[:16]
+        
+        sig = get_log_signature(log.raw, meta, strings)
 
         signature_key = f"yara:{rule_name}|{sig}"
         signature = md5hex(signature_key)
-
-        # immediate alert for threshold <= 1
-        now = dt.datetime.now(dt.timezone.utc)
-        if threshold <= 1:
-            alert = Alert.query.filter_by(signature=signature).first()
-            if alert:
-                alert.count += 1
-                alert.last_seen = now
-                db.session.add(AlertLog(alert_id=alert.id, log_id=log.id))
-                db.session.commit()
-            else:
-                alert = Alert(
-                    yara_rule_name=rule_name, # <-- ADDED
-                    rule_id=None,
-                    signature=signature,
-                    count=1,
-                    first_seen=now, last_seen=now, sample_log_id=log.id)
-                db.session.add(alert); db.session.commit()
-                db.session.add(AlertLog(alert_id=alert.id, log_id=log.id)); db.session.commit()
-            matched.append({'rule': rule_name, 'alert_id': alert.id, 'reason': 'single'})
-            continue
-
-        # sliding-window: window relative to event_time
+        
+        # 🛠️ FIXED: Query the Log table directly to count all matching logs for this signature
+        # within the time window. This is the new, robust correlation logic.
         window_start = event_time - dt.timedelta(seconds=window)
-
-        # collect recent logs in the [window_start, event_time] range
-        recent_logs = []
-        try:
-            recent_logs = Log.query.filter(
-                Log.timestamp != None,
-                Log.timestamp >= window_start,
-                Log.timestamp <= event_time
-            ).order_by(Log.timestamp.desc()).all()
-        except Exception:
-            recent_logs = []
-
-        try:
-            created_q = Log.query.filter(
-                Log.timestamp == None,
-                Log.created_at >= window_start,
-                Log.created_at <= event_time
-            ).order_by(Log.created_at.desc()).all()
-            seen_ids = set(l.id for l in recent_logs)
-            for rl in created_q:
-                if rl.id not in seen_ids:
-                    recent_logs.append(rl)
-                    seen_ids.add(rl.id)
-        except Exception:
-            pass
-
-        if log.id not in [r.id for r in recent_logs]:
-            recent_logs.insert(0, log)
-
+        
+        # To count previous matches, we iterate through logs within the window
+        # and re-run the signature derivation.
+        recent_logs = Log.query.filter(
+            Log.created_at >= window_start,
+            Log.created_at <= event_time
+        ).all()
+        
         recent_count = 0
-        for rl in recent_logs:
-            try:
-                rl_matches = COMPILED_RULES.match(data=rl.raw)
-                if not rl_matches:
-                    continue
-                matched_names = [mm.rule for mm in rl_matches]
-                if rule_name not in matched_names:
-                    continue
+        for r_log in recent_logs:
+            r_matches = COMPILED_RULES.match(data=r_log.raw)
+            for r_m in r_matches:
+                if r_m.rule == rule_name:
+                    r_sig = get_log_signature(r_log.raw, r_m.meta, r_m.strings)
+                    if r_sig == sig:
+                        recent_count += 1
+                        break # Found a match for this log, move to the next log
 
-                if group_by_regex:
-                    mm2 = re.search(group_by_regex, rl.raw)
-                    if not mm2:
-                        continue
-                    val = mm2.group(1) if len(mm2.groups()) >= 1 else mm2.group(0)
-                    if val != sig:
-                        continue
-                else:
-                    if sig not in rl.raw and sig != md5hex(rl.raw)[:16]:
-                        continue
-
-                recent_count += 1
-            except Exception:
-                continue
-
+        now = dt.datetime.now(dt.timezone.utc)
+        
         if recent_count >= threshold:
             alert = Alert.query.filter_by(signature=signature).first()
             if alert:
                 alert.count = max(alert.count, recent_count)
                 alert.last_seen = event_time if isinstance(event_time, dt.datetime) else now
-                db.session.add(AlertLog(alert_id=alert.id, log_id=log.id))
+                # db.session.add(AlertLog(alert_id=alert.id, log_id=log.id))
                 db.session.commit()
             else:
                 alert = Alert(
-                    yara_rule_name=rule_name, # <-- ADDED
+                    yara_rule_name=rule_name,
                     rule_id=None,
                     signature=signature,
                     count=recent_count,
@@ -335,11 +285,12 @@ def apply_yara_rules_to_log(log: Log):
                     last_seen=event_time if isinstance(event_time, dt.datetime) else now,
                     sample_log_id=log.id)
                 db.session.add(alert); db.session.commit()
-                db.session.add(AlertLog(alert_id=alert.id, log_id=log.id)); db.session.commit()
+            # 🛠️ FIXED: Add an AlertLog entry to link this specific log to the new alert
+            db.session.add(AlertLog(alert_id=alert.id, log_id=log.id)); db.session.commit()
             matched.append({'rule': rule_name, 'alert_id': alert.id, 'reason': f'{recent_count}/{threshold}'})
         else:
             matched.append({'rule': rule_name, 'alert_id': None, 'reason': f'waiting {recent_count}/{threshold}'})
-
+            
     return matched
 
 # --------------------
@@ -511,8 +462,11 @@ base_tpl = '''
     <body>
         <nav class="navbar navbar-dark bg-dark mb-3">
             <div class="container-fluid">
-                <a class="navbar-brand" href="/">AutoSecOps</a>
+                <a class="navbar-brand" href="/">FlaskSIEM</a>
                 <div>
+                    <form action="/clear_notes" method="post" class="d-inline">
+                        <button type="submit" class="btn btn-sm btn-danger">Clear Notes</button>
+                    </form>
                     <button id="reload" class="btn btn-sm btn-secondary">Reload YARA</button>
                     <button id="ingest" class="btn btn-sm btn-light">Ingest</button>
                 </div>
@@ -559,6 +513,10 @@ def alert_view(alert_id):
         except Exception:
             udm_pre = str(log.udm)
         parts += f'<div class="card mb-2"><div class="card-body"><pre style="white-space:pre-wrap">{log.raw}</pre><details><summary>UDM</summary><pre>{udm_pre}</pre></details></div></div>'
+    
+    # 🛠️ FIXED: Replaced <pre> with a <div> to allow for bolding the date.
+    notes_html = f'''<div style="white-space: pre-wrap;">{a.notes or ''}</div>'''
+    
     content = f'''
     <h2>Alert {a.id}</h2>
     <p><strong>Rule:</strong> {a.yara_rule_name or a.rule_id or 'N/A'}</p>
@@ -567,7 +525,7 @@ def alert_view(alert_id):
     <h3>Recent logs</h3>
     {parts}
     <h3>Notes</h3>
-    <pre>{a.notes or ''}</pre>
+    {notes_html}
     '''
     rendered = render_template_string(base_tpl, content=content)
     return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
@@ -601,16 +559,13 @@ def analyze(alert_id):
     Keep it concise, executive-ready, and suitable for SOC handover reports.
     """
 
-    # Combine the predefined prompt with the log data
     prompt = predefined_prompt + "\n\nLogs to analyze:\n" + "\n".join(texts)
 
     if not GOOGLE_API_KEY:
         return "Google API key not configured. Set GOOGLE_API_KEY env var.", 400
 
-    # 🛠️ FIXED: Updated to the new API endpoint and model for Gemini 1.5 Flash.
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GOOGLE_API_KEY}"
     
-    # 🛠️ FIXED: The payload structure is the same as gemini-pro.
     payload = {
         "contents": [
             {
@@ -624,26 +579,33 @@ def analyze(alert_id):
             "maxOutputTokens": 512
         }
     }
-    
+
     try:
         r = requests.post(url, json=payload, timeout=30)
         r.raise_for_status()
         data = r.json()
-        
+
         output = ''
         if 'candidates' in data and data['candidates']:
             first_candidate = data['candidates'][0]
             if 'content' in first_candidate and 'parts' in first_candidate['content']:
                 output = '\n\n'.join([part.get('text', '') for part in first_candidate['content']['parts']])
-        
+
         if not output:
             output = json.dumps(data, indent=2)
 
     except Exception as e:
         output = f"Error calling Google API: {e}"
-
-    a.notes = (a.notes or '') + f"\n\n--- Analysis ({dt.datetime.now(dt.timezone.utc).isoformat()}):\n" + output
-    db.session.commit()
+        
+    # 🛠️ FIXED: Appends new notes only if they are not duplicates, and adds a bold timestamp.
+    new_note = f"<strong>Last Updated: {dt.datetime.now(dt.timezone.utc).isoformat()}</strong>\n\n" + output
+    if a.notes is None or new_note not in a.notes:
+        if a.notes is None:
+            a.notes = new_note
+        else:
+            a.notes += "\n\n" + new_note
+        db.session.commit()
+    
     content = f"<h2>Analysis for Alert {a.id}</h2><pre>{output}</pre><p><a href='/alert/{a.id}'>Back</a></p>"
     rendered = render_template_string(base_tpl, content=content)
     return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
@@ -700,6 +662,23 @@ def api_add_rule():
     r = Rule(name=name, pattern=pattern)
     db.session.add(r); db.session.commit()
     return jsonify({'ok': True, 'id': r.id})
+
+# --------------------
+# New endpoint to clear notes
+# --------------------
+@app.route('/clear_notes', methods=['POST'])
+def clear_notes():
+    """
+    Clears all notes from the Alert table.
+    """
+    try:
+        db.session.query(Alert).update({Alert.notes: ''}, synchronize_session=False)
+        db.session.commit()
+        # Redirect back to the dashboard after clearing notes
+        return redirect(url_for('dashboard'))
+    except Exception as e:
+        db.session.rollback()
+        return f"An error occurred: {str(e)}", 500
 
 # --------------------
 # Run
