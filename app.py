@@ -20,6 +20,12 @@ import yara
 import requests
 from dotenv import load_dotenv
 
+import threading
+import time
+from queue import Queue
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
 from flask import Flask, request, jsonify, render_template_string, make_response, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
 
@@ -86,12 +92,10 @@ class Playbook(db.Model):
     steps = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=now_utc)
     
-# 🛠️ FIXED: Add a new model to track processed files
 class ProcessedFile(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(255), unique=True, nullable=False)
     processed_at = db.Column(db.DateTime, default=now_utc)
-
 
 with app.app_context():
     db.create_all()
@@ -297,39 +301,21 @@ def apply_yara_rules_to_log(log: Log):
     return matched
 
 # --------------------
-# Ingest endpoint
+# Automated ingestion
 # --------------------
-@app.route('/ingest', methods=['GET', 'POST'])
-def ingest():
-    if request.method == 'GET':
-        files = []
-        if os.path.isdir(STORAGE_PATH):
-            files = os.listdir(STORAGE_PATH)
-        return jsonify({'storage_path': STORAGE_PATH, 'file_count': len(files)})
-
-    processed = 0
-    os.makedirs(STORAGE_PATH, exist_ok=True)
-    
-    # 🛠️ FIXED: Get a list of files that have already been processed
-    processed_files = {f.filename for f in ProcessedFile.query.all()}
-    
-    for fname in sorted(os.listdir(STORAGE_PATH)):
-        # 🛠️ FIXED: Skip files that have already been processed
-        if fname in processed_files:
-            continue
-            
-        fpath = os.path.join(STORAGE_PATH, fname)
-        if not os.path.isfile(fpath):
-            continue
+# 🛠️ FIXED: File processing function for the new thread.
+def process_file_changes(file_path):
+    with app.app_context():
+        fname = os.path.basename(file_path)
+        app.logger.info(f"Processing new file: {fname}")
+        
         try:
-            with open(fpath, 'r', encoding='utf-8', errors='ignore') as fh:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as fh:
                 for line in fh:
                     raw = line.strip()
                     if not raw:
                         continue
-                    # 🛠️ FIXED: Removed the log.query check, as the file-based check is better
-                    # This prevents us from skipping logs in a new file just because they
-                    # might have the same content as old logs.
+
                     udm = parse_udm(raw)
                     ts = None
                     if isinstance(udm, dict) and 'timestamp' in udm:
@@ -344,16 +330,68 @@ def ingest():
                     db.session.add(log)
                     db.session.commit()
                     apply_yara_rules_to_log(log)
-                    processed += 1
             
-            # 🛠️ FIXED: Mark the file as processed after it has been fully ingested
             db.session.add(ProcessedFile(filename=fname)); db.session.commit()
+            app.logger.info(f"Finished processing file: {fname}")
             
         except Exception as e:
-            app.logger.error("Error reading file %s: %s", fpath, e)
-            continue
+            app.logger.error(f"Error processing file {fname}: {e}")
 
-    return jsonify({'processed': processed})
+# 🛠️ FIXED: File system event handler
+file_queue = Queue()
+
+class LogFileHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.endswith(('.log', '.json', '.txt')):
+            file_queue.put(event.src_path)
+    
+    def on_modified(self, event):
+        if not event.is_directory and event.src_path.endswith(('.log', '.json', '.txt')):
+            # Simple debounce for file modifications
+            if os.path.basename(event.src_path) not in processed_files and os.path.getmtime(event.src_path) > time.time() - 1:
+                file_queue.put(event.src_path)
+
+
+# 🛠️ FIXED: Background worker thread for processing
+def worker():
+    while True:
+        file_path = file_queue.get()
+        process_file_changes(file_path)
+        file_queue.task_done()
+
+# 🛠️ FIXED: Start observer and worker thread when the app starts
+observer = Observer()
+processed_files = set()
+def start_observer():
+    global processed_files
+    with app.app_context():
+        processed_files = {f.filename for f in ProcessedFile.query.all()}
+    
+    event_handler = LogFileHandler()
+    observer.schedule(event_handler, STORAGE_PATH, recursive=False)
+    observer.start()
+
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+
+# --------------------
+# Ingest endpoint
+# --------------------
+@app.route('/ingest', methods=['GET', 'POST'])
+def ingest():
+    if request.method == 'POST':
+        # 🛠️ FIXED: Now, the ingest button triggers a re-scan of the directory
+        # This is a fallback to process any files missed by the observer
+        with app.app_context():
+            processed_files = {f.filename for f in ProcessedFile.query.all()}
+            for fname in os.listdir(STORAGE_PATH):
+                if fname not in processed_files:
+                    file_queue.put(os.path.join(STORAGE_PATH, fname))
+        return jsonify({'message': 'Manual ingestion triggered. Processing new files...'})
+
+    # 🛠️ FIXED: For GET, provide a status message
+    return jsonify({'message': 'Automated ingestion is active. Add new files to the logs directory.'})
+
 
 # --------------------
 # Debug/status & utilities
@@ -377,7 +415,9 @@ def debug_status():
         "yar_files": yar_count,
         "logs_lines": logs_count,
         "alerts": alerts_count,
-        "last_yara_error": LAST_YARA_ERROR
+        "last_yara_error": LAST_YARA_ERROR,
+        "automated_ingestion": True,
+        "files_in_queue": file_queue.qsize()
     })
 
 @app.route('/_rules_test_matches')
@@ -699,4 +739,5 @@ def clear_notes():
 if __name__ == '__main__':
     os.makedirs(STORAGE_PATH, exist_ok=True)
     os.makedirs(RULES_DIR, exist_ok=True)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    start_observer()
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
