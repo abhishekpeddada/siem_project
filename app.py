@@ -580,7 +580,29 @@ def analyze(alert_id):
     for l in links:
         log = Log.query.get(l.log_id)
         texts.append(log.raw)
-    prompt = "Analyze these logs and provide root cause, suggested next steps, and a short playbook:\n\n" + "\n\n".join(texts)
+
+    predefined_prompt = """
+    Assume you are a seasoned Cybersecurity Analyst. Analyze the logs provided and deliver a professional incident report in the following structure:
+
+    Observations:
+    Identify suspicious or notable activities, abnormal patterns, or policy violations from the logs.
+    Highlight user accounts, IP addresses, devices, or applications involved.
+
+    Impact Assessment:
+    Explain the potential or confirmed security risks of the observed activity (e.g., data exfiltration, privilege escalation, lateral movement, external exposure).
+    Clarify whether this is a critical, high, medium, or low severity issue.
+
+    Recommendations:
+    Provide clear, actionable security measures (technical and procedural) to mitigate or prevent similar events.
+    Mention immediate containment steps if needed.
+
+    Summary (Highlights):
+    Bullet-point the major red flags and key takeaways that stakeholders must pay attention to.
+    Keep it concise, executive-ready, and suitable for SOC handover reports.
+    """
+
+    # Combine the predefined prompt with the log data
+    prompt = predefined_prompt + "\n\nLogs to analyze:\n" + "\n".join(texts)
 
     if not GOOGLE_API_KEY:
         return "Google API key not configured. Set GOOGLE_API_KEY env var.", 400
