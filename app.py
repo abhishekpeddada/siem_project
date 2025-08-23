@@ -511,7 +511,7 @@ base_tpl = '''
     <body>
         <nav class="navbar navbar-dark bg-dark mb-3">
             <div class="container-fluid">
-                <a class="navbar-brand" href="/">FlaskSIEM</a>
+                <a class="navbar-brand" href="/">AutoSecOps</a>
                 <div>
                     <button id="reload" class="btn btn-sm btn-secondary">Reload YARA</button>
                     <button id="ingest" class="btn btn-sm btn-light">Ingest</button>
