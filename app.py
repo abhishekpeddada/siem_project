@@ -73,6 +73,8 @@ class Alert(db.Model):
     last_seen = db.Column(db.DateTime, default=now_utc)
     sample_log_id = db.Column(db.Integer, db.ForeignKey('log.id'), nullable=True)
     notes = db.Column(db.Text)
+    # 🛠️ FIXED: Added a new column to store the human-readable derived signature
+    display_sig = db.Column(db.String(255), nullable=True)
 
 class AlertLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -273,7 +275,8 @@ def apply_yara_rules_to_log(log: Log):
             if alert:
                 alert.count = max(alert.count, recent_count)
                 alert.last_seen = event_time if isinstance(event_time, dt.datetime) else now
-                # db.session.add(AlertLog(alert_id=alert.id, log_id=log.id))
+                # 🛠️ FIXED: Update the display_sig on the existing alert
+                alert.display_sig = sig
                 db.session.commit()
             else:
                 alert = Alert(
@@ -283,7 +286,9 @@ def apply_yara_rules_to_log(log: Log):
                     count=recent_count,
                     first_seen=event_time if isinstance(event_time, dt.datetime) else now,
                     last_seen=event_time if isinstance(event_time, dt.datetime) else now,
-                    sample_log_id=log.id)
+                    sample_log_id=log.id,
+                    # 🛠️ FIXED: Set the new display_sig
+                    display_sig=sig)
                 db.session.add(alert); db.session.commit()
             # 🛠️ FIXED: Add an AlertLog entry to link this specific log to the new alert
             db.session.add(AlertLog(alert_id=alert.id, log_id=log.id)); db.session.commit()
@@ -490,12 +495,12 @@ def dashboard():
     alerts = Alert.query.order_by(Alert.last_seen.desc()).all()
     rows = ''
     for a in alerts:
-        # Use yara_rule_name if available, otherwise fallback
-        rule_name = a.yara_rule_name if a.yara_rule_name else (f'Rule ID {a.rule_id}' if a.rule_id else 'N/A')
-        rows += f"<tr><td>{a.id}</td><td>{rule_name}</td><td>{a.count}</td><td>{a.first_seen}</td><td>{a.last_seen}</td><td><a href='/alert/{a.id}'>View</a></td></tr>"
+        # 🛠️ FIXED: Show the unique display signature, falling back to rule name if not available
+        display_name = f"{a.yara_rule_name} / {a.display_sig}" if a.display_sig else a.yara_rule_name if a.yara_rule_name else 'N/A'
+        rows += f"<tr><td>{a.id}</td><td>{display_name}</td><td>{a.count}</td><td>{a.first_seen}</td><td>{a.last_seen}</td><td><a href='/alert/{a.id}'>View</a></td></tr>"
     content = f'''
     <h1>Alerts</h1>
-    <table class="table table-striped"><thead><tr><th>ID</th><th>Rule</th><th>Count</th><th>First</th><th>Last</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table>
+    <table class="table table-striped"><thead><tr><th>ID</th><th>Rule/Signature</th><th>Count</th><th>First</th><th>Last</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table>
     '''
     rendered = render_template_string(base_tpl, content=content)
     return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
@@ -521,6 +526,7 @@ def alert_view(alert_id):
     <h2>Alert {a.id}</h2>
     <p><strong>Rule:</strong> {a.yara_rule_name or a.rule_id or 'N/A'}</p>
     <p><strong>Count:</strong> {a.count}</p>
+    <p><strong>Signature:</strong> {a.display_sig or a.yara_rule_name or 'N/A'}</p>
     <p><a class="btn btn-primary" href="/analyze/{a.id}">Analyze with Google AI</a></p>
     <h3>Recent logs</h3>
     {parts}
