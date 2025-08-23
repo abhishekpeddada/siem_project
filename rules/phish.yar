@@ -11,8 +11,8 @@ rule PhishingEmailClick
     $a = "EMAIL_RECEIVED" ascii
     $b = "secure-microsoft-login.com" ascii
     $c = "EMAIL_CLICK" ascii
-    $d = /from=\"[^\"]+\"/
+    $d = /from="[^"]+"/
 
   condition:
-    ($a and $b) or $c
+    (($a and $b and $d) or $c)
 }
