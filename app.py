@@ -64,7 +64,6 @@ class Rule(db.Model):
 
 class Alert(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    # yara_rule_name is a better way to store the source of the alert.
     yara_rule_name = db.Column(db.String(255), nullable=True)
     rule_id = db.Column(db.Integer, db.ForeignKey('rule.id'), nullable=True)
     signature = db.Column(db.String(128), unique=True, nullable=False)
@@ -73,22 +72,26 @@ class Alert(db.Model):
     last_seen = db.Column(db.DateTime, default=now_utc)
     sample_log_id = db.Column(db.Integer, db.ForeignKey('log.id'), nullable=True)
     notes = db.Column(db.Text)
-    # 🛠️ FIXED: Added a new column to store the human-readable derived signature
     display_sig = db.Column(db.String(255), nullable=True)
 
 class AlertLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     alert_id = db.Column(db.Integer, db.ForeignKey('alert.id'))
     log_id = db.Column(db.Integer, db.ForeignKey('log.id'))
-    # 🛠️ FIXED: Changed to db.DateTime for SQLAlchemy compatibility
     created_at = db.Column(db.DateTime, default=now_utc)
 
 class Playbook(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200))
     steps = db.Column(db.Text)
-    # 🛠️ FIXED: Changed to db.DateTime for SQLAlchemy compatibility
     created_at = db.Column(db.DateTime, default=now_utc)
+    
+# 🛠️ FIXED: Add a new model to track processed files
+class ProcessedFile(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(255), unique=True, nullable=False)
+    processed_at = db.Column(db.DateTime, default=now_utc)
+
 
 with app.app_context():
     db.create_all()
@@ -123,7 +126,7 @@ def parse_udm(raw: str):
         return {"timestamp": m.group('ts'), "message": m.group('rest')}
     return {"message": raw}
 
-def get_log_signature(log_data, rule_meta, rule_strings):
+def get_log_signature(log_data, rule_meta, rule_strings, rule_name):
     """
     Derives a consistent signature from a log entry based on YARA rule metadata.
     """
@@ -162,7 +165,7 @@ def get_log_signature(log_data, rule_meta, rule_strings):
         try:
             udm = json.loads(log_data) if log_data else {}
             if isinstance(udm, dict):
-                for k in ('src_ip', 'ip', 'user', 'username', 'from', 'email'):
+                for k in ('src_ip', 'ip', 'source_ip'):
                     if k in udm:
                         sig = udm.get(k)
                         break
@@ -242,17 +245,13 @@ def apply_yara_rules_to_log(log: Log):
         except Exception:
             window = 60
         
-        sig = get_log_signature(log.raw, meta, strings)
+        sig = get_log_signature(log.raw, meta, strings, rule_name)
 
         signature_key = f"yara:{rule_name}|{sig}"
         signature = md5hex(signature_key)
         
-        # 🛠️ FIXED: Query the Log table directly to count all matching logs for this signature
-        # within the time window. This is the new, robust correlation logic.
         window_start = event_time - dt.timedelta(seconds=window)
         
-        # To count previous matches, we iterate through logs within the window
-        # and re-run the signature derivation.
         recent_logs = Log.query.filter(
             Log.created_at >= window_start,
             Log.created_at <= event_time
@@ -263,10 +262,10 @@ def apply_yara_rules_to_log(log: Log):
             r_matches = COMPILED_RULES.match(data=r_log.raw)
             for r_m in r_matches:
                 if r_m.rule == rule_name:
-                    r_sig = get_log_signature(r_log.raw, r_m.meta, r_m.strings)
+                    r_sig = get_log_signature(r_log.raw, r_m.meta, r_m.strings, r_m.rule)
                     if r_sig == sig:
                         recent_count += 1
-                        break # Found a match for this log, move to the next log
+                        break
 
         now = dt.datetime.now(dt.timezone.utc)
         
@@ -275,7 +274,6 @@ def apply_yara_rules_to_log(log: Log):
             if alert:
                 alert.count = max(alert.count, recent_count)
                 alert.last_seen = event_time if isinstance(event_time, dt.datetime) else now
-                # 🛠️ FIXED: Update the display_sig on the existing alert
                 alert.display_sig = sig
                 db.session.commit()
             else:
@@ -287,11 +285,11 @@ def apply_yara_rules_to_log(log: Log):
                     first_seen=event_time if isinstance(event_time, dt.datetime) else now,
                     last_seen=event_time if isinstance(event_time, dt.datetime) else now,
                     sample_log_id=log.id,
-                    # 🛠️ FIXED: Set the new display_sig
                     display_sig=sig)
-                db.session.add(alert); db.session.commit()
-            # 🛠️ FIXED: Add an AlertLog entry to link this specific log to the new alert
-            db.session.add(AlertLog(alert_id=alert.id, log_id=log.id)); db.session.commit()
+                db.session.add(alert)
+                db.session.commit()
+            db.session.add(AlertLog(alert_id=alert.id, log_id=log.id))
+            db.session.commit()
             matched.append({'rule': rule_name, 'alert_id': alert.id, 'reason': f'{recent_count}/{threshold}'})
         else:
             matched.append({'rule': rule_name, 'alert_id': None, 'reason': f'waiting {recent_count}/{threshold}'})
@@ -311,7 +309,15 @@ def ingest():
 
     processed = 0
     os.makedirs(STORAGE_PATH, exist_ok=True)
+    
+    # 🛠️ FIXED: Get a list of files that have already been processed
+    processed_files = {f.filename for f in ProcessedFile.query.all()}
+    
     for fname in sorted(os.listdir(STORAGE_PATH)):
+        # 🛠️ FIXED: Skip files that have already been processed
+        if fname in processed_files:
+            continue
+            
         fpath = os.path.join(STORAGE_PATH, fname)
         if not os.path.isfile(fpath):
             continue
@@ -321,8 +327,9 @@ def ingest():
                     raw = line.strip()
                     if not raw:
                         continue
-                    if Log.query.filter_by(raw=raw).first():
-                        continue
+                    # 🛠️ FIXED: Removed the log.query check, as the file-based check is better
+                    # This prevents us from skipping logs in a new file just because they
+                    # might have the same content as old logs.
                     udm = parse_udm(raw)
                     ts = None
                     if isinstance(udm, dict) and 'timestamp' in udm:
@@ -338,6 +345,10 @@ def ingest():
                     db.session.commit()
                     apply_yara_rules_to_log(log)
                     processed += 1
+            
+            # 🛠️ FIXED: Mark the file as processed after it has been fully ingested
+            db.session.add(ProcessedFile(filename=fname)); db.session.commit()
+            
         except Exception as e:
             app.logger.error("Error reading file %s: %s", fpath, e)
             continue
@@ -495,7 +506,6 @@ def dashboard():
     alerts = Alert.query.order_by(Alert.last_seen.desc()).all()
     rows = ''
     for a in alerts:
-        # 🛠️ FIXED: Show the unique display signature, falling back to rule name if not available
         display_name = f"{a.yara_rule_name} / {a.display_sig}" if a.display_sig else a.yara_rule_name if a.yara_rule_name else 'N/A'
         rows += f"<tr><td>{a.id}</td><td>{display_name}</td><td>{a.count}</td><td>{a.first_seen}</td><td>{a.last_seen}</td><td><a href='/alert/{a.id}'>View</a></td></tr>"
     content = f'''
@@ -519,7 +529,6 @@ def alert_view(alert_id):
             udm_pre = str(log.udm)
         parts += f'<div class="card mb-2"><div class="card-body"><pre style="white-space:pre-wrap">{log.raw}</pre><details><summary>UDM</summary><pre>{udm_pre}</pre></details></div></div>'
     
-    # 🛠️ FIXED: Replaced <pre> with a <div> to allow for bolding the date.
     notes_html = f'''<div style="white-space: pre-wrap;">{a.notes or ''}</div>'''
     
     content = f'''
@@ -603,7 +612,6 @@ def analyze(alert_id):
     except Exception as e:
         output = f"Error calling Google API: {e}"
         
-    # 🛠️ FIXED: Appends new notes only if they are not duplicates, and adds a bold timestamp.
     new_note = f"<strong>Last Updated: {dt.datetime.now(dt.timezone.utc).isoformat()}</strong>\n\n" + output
     if a.notes is None or new_note not in a.notes:
         if a.notes is None:
@@ -680,7 +688,6 @@ def clear_notes():
     try:
         db.session.query(Alert).update({Alert.notes: ''}, synchronize_session=False)
         db.session.commit()
-        # Redirect back to the dashboard after clearing notes
         return redirect(url_for('dashboard'))
     except Exception as e:
         db.session.rollback()
