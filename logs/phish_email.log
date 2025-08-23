@@ -1,0 +1,1 @@
+2025-08-23 11:17:53 EMAIL_RECEIVED from="it-support@secure-microsoft-login.com" to="employee1@company.com" subject="Password Reset Required" action=delivered\n2025-08-23 11:17:53 EMAIL_CLICK user=employee1@company.com link="http://secure-microsoft-login.com/reset"\n2025-08-23 11:17:53 EMAIL_ALERT user=employee1@company.com detection=phishing domain="secure-microsoft-login.com"\n
