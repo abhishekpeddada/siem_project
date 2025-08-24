@@ -26,7 +26,7 @@ from queue import Queue
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from flask import Flask, request, jsonify, render_template_string, make_response, redirect, url_for
+from flask import Flask, request, jsonify, render_template, make_response, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
 
 # --------------------
@@ -303,7 +303,6 @@ def apply_yara_rules_to_log(log: Log):
 # --------------------
 # Automated ingestion
 # --------------------
-# 🛠️ FIXED: File processing function for the new thread.
 def process_file_changes(file_path):
     with app.app_context():
         fname = os.path.basename(file_path)
@@ -337,7 +336,6 @@ def process_file_changes(file_path):
         except Exception as e:
             app.logger.error(f"Error processing file {fname}: {e}")
 
-# 🛠️ FIXED: File system event handler
 file_queue = Queue()
 
 class LogFileHandler(FileSystemEventHandler):
@@ -347,19 +345,10 @@ class LogFileHandler(FileSystemEventHandler):
     
     def on_modified(self, event):
         if not event.is_directory and event.src_path.endswith(('.log', '.json', '.txt')):
-            # Simple debounce for file modifications
             if os.path.basename(event.src_path) not in processed_files and os.path.getmtime(event.src_path) > time.time() - 1:
                 file_queue.put(event.src_path)
 
 
-# 🛠️ FIXED: Background worker thread for processing
-def worker():
-    while True:
-        file_path = file_queue.get()
-        process_file_changes(file_path)
-        file_queue.task_done()
-
-# 🛠️ FIXED: Start observer and worker thread when the app starts
 observer = Observer()
 processed_files = set()
 def start_observer():
@@ -374,14 +363,18 @@ def start_observer():
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
 
+def worker():
+    while True:
+        file_path = file_queue.get()
+        process_file_changes(file_path)
+        file_queue.task_done()
+
 # --------------------
 # Ingest endpoint
 # --------------------
 @app.route('/ingest', methods=['GET', 'POST'])
 def ingest():
     if request.method == 'POST':
-        # 🛠️ FIXED: Now, the ingest button triggers a re-scan of the directory
-        # This is a fallback to process any files missed by the observer
         with app.app_context():
             processed_files = {f.filename for f in ProcessedFile.query.all()}
             for fname in os.listdir(STORAGE_PATH):
@@ -389,7 +382,6 @@ def ingest():
                     file_queue.put(os.path.join(STORAGE_PATH, fname))
         return jsonify({'message': 'Manual ingestion triggered. Processing new files...'})
 
-    # 🛠️ FIXED: For GET, provide a status message
     return jsonify({'message': 'Automated ingestion is active. Add new files to the logs directory.'})
 
 
@@ -506,84 +498,17 @@ def reprocess_logs():
 # --------------------
 # UI (dashboard, alerts, logs, playbooks)
 # --------------------
-base_tpl = '''
-<!doctype html>
-<html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Flask SIEM</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    </head>
-    <body>
-        <nav class="navbar navbar-dark bg-dark mb-3">
-            <div class="container-fluid">
-                <a class="navbar-brand" href="/">FlaskSIEM</a>
-                <div>
-                    <form action="/clear_notes" method="post" class="d-inline">
-                        <button type="submit" class="btn btn-sm btn-danger">Clear Notes</button>
-                    </form>
-                    <button id="reload" class="btn btn-sm btn-secondary">Reload YARA</button>
-                    <button id="ingest" class="btn btn-sm btn-light">Ingest</button>
-                </div>
-            </div>
-        </nav>
-        <div class="container">{{ content|safe }}</div>
-        <script>
-            document.getElementById('reload').addEventListener('click', ()=> {
-                fetch('/rules/reload', {method:'POST'}).then(()=>location.reload());
-            });
-            document.getElementById('ingest').addEventListener('click', ()=> {
-                fetch('/ingest', {method:'POST'}).then(()=>location.reload());
-            });
-        </script>
-    </body>
-</html>
-'''
-
 @app.route('/')
 def dashboard():
     alerts = Alert.query.order_by(Alert.last_seen.desc()).all()
-    rows = ''
-    for a in alerts:
-        display_name = f"{a.yara_rule_name} / {a.display_sig}" if a.display_sig else a.yara_rule_name if a.yara_rule_name else 'N/A'
-        rows += f"<tr><td>{a.id}</td><td>{display_name}</td><td>{a.count}</td><td>{a.first_seen}</td><td>{a.last_seen}</td><td><a href='/alert/{a.id}'>View</a></td></tr>"
-    content = f'''
-    <h1>Alerts</h1>
-    <table class="table table-striped"><thead><tr><th>ID</th><th>Rule/Signature</th><th>Count</th><th>First</th><th>Last</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table>
-    '''
-    rendered = render_template_string(base_tpl, content=content)
-    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
+    return render_template('index.html', alerts=alerts)
 
 @app.route('/alert/<int:alert_id>')
 def alert_view(alert_id):
     a = Alert.query.get_or_404(alert_id)
     links = AlertLog.query.filter_by(alert_id=alert_id).order_by(AlertLog.created_at.desc()).limit(50).all()
-    parts = ''
-    for l in links:
-        log = Log.query.get(l.log_id)
-        udm_pre = ''
-        try:
-            udm_pre = json.dumps(json.loads(log.udm), indent=2)
-        except Exception:
-            udm_pre = str(log.udm)
-        parts += f'<div class="card mb-2"><div class="card-body"><pre style="white-space:pre-wrap">{log.raw}</pre><details><summary>UDM</summary><pre>{udm_pre}</pre></details></div></div>'
     
-    notes_html = f'''<div style="white-space: pre-wrap;">{a.notes or ''}</div>'''
-    
-    content = f'''
-    <h2>Alert {a.id}</h2>
-    <p><strong>Rule:</strong> {a.yara_rule_name or a.rule_id or 'N/A'}</p>
-    <p><strong>Count:</strong> {a.count}</p>
-    <p><strong>Signature:</strong> {a.display_sig or a.yara_rule_name or 'N/A'}</p>
-    <p><a class="btn btn-primary" href="/analyze/{a.id}">Analyze with Google AI</a></p>
-    <h3>Recent logs</h3>
-    {parts}
-    <h3>Notes</h3>
-    {notes_html}
-    '''
-    rendered = render_template_string(base_tpl, content=content)
-    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
+    return render_template('alert_view.html', alert=a, links=links, Log=Log)
 
 @app.route('/analyze/<int:alert_id>', methods=['GET'])
 def analyze(alert_id):
@@ -652,17 +577,13 @@ def analyze(alert_id):
     except Exception as e:
         output = f"Error calling Google API: {e}"
         
+    # 🛠️ FIXED: The notes are now completely replaced instead of appended.
+    # This is what you requested to avoid duplicate analysis reports.
     new_note = f"<strong>Last Updated: {dt.datetime.now(dt.timezone.utc).isoformat()}</strong>\n\n" + output
-    if a.notes is None or new_note not in a.notes:
-        if a.notes is None:
-            a.notes = new_note
-        else:
-            a.notes += "\n\n" + new_note
-        db.session.commit()
+    a.notes = new_note
+    db.session.commit()
     
-    content = f"<h2>Analysis for Alert {a.id}</h2><pre>{output}</pre><p><a href='/alert/{a.id}'>Back</a></p>"
-    rendered = render_template_string(base_tpl, content=content)
-    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
+    return redirect(url_for('alert_view', alert_id=alert_id))
 
 @app.route('/logs')
 def view_logs():
@@ -671,40 +592,22 @@ def view_logs():
         logs = Log.query.filter(Log.raw.contains(q)).order_by(Log.created_at.desc()).limit(200).all()
     else:
         logs = Log.query.order_by(Log.created_at.desc()).limit(200).all()
-    rows = ''
-    for l in logs:
-        rows += f"<tr><td>{l.id}</td><td><pre style='white-space:pre-wrap'>{l.raw}</pre></td><td>{l.created_at}</td></tr>"
-    content = f'''
-    <h2>Logs</h2>
-    <form class="mb-3"><input name="q" placeholder="search" class="form-control" value="{request.args.get('q','')}"></form>
-    <table class="table"><thead><tr><th>ID</th><th>Raw</th><th>When</th></tr></thead><tbody>{rows}</tbody></table>
-    '''
-    rendered = render_template_string(base_tpl, content=content)
-    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
+    
+    return render_template('logs.html', logs=logs, q=q)
 
-@app.route('/playbooks', methods=['GET','POST'])
+@app.route('/playbooks')
 def playbooks():
-    if request.method == 'POST':
-        name = request.form.get('name')
-        steps = request.form.get('steps')
-        p = Playbook(name=name, steps=steps)
-        db.session.add(p); db.session.commit()
-        return redirect(url_for('playbooks'))
     pls = Playbook.query.order_by(Playbook.id.desc()).all()
-    rows = ''
-    for p in pls:
-        rows += f"<tr><td>{p.id}</td><td>{p.name}</td><td><pre>{p.steps}</pre></td></tr>"
-    content = f'''
-    <h2>Playbooks</h2>
-    <form method="post" class="mb-3">
-        <input name="name" placeholder="Playbook name" class="form-control mb-2" required>
-        <textarea name="steps" placeholder="Steps (one per line or JSON)" class="form-control mb-2"></textarea>
-        <button class="btn btn-primary">Add</button>
-    </form>
-    <table class="table"><thead><tr><th>ID</th><th>Name</th><th>Steps</th></tr></thead><tbody>{rows}</tbody></table>
-    '''
-    rendered = render_template_string(base_tpl, content=content)
-    return make_response(rendered, 200, {'Content-Type': 'text/html; charset=utf-8'})
+    return render_template('playbooks.html', playbooks=pls)
+
+@app.route('/playbooks/add', methods=['POST'])
+def add_playbook():
+    name = request.form.get('name')
+    steps = request.form.get('steps')
+    p = Playbook(name=name, steps=steps)
+    db.session.add(p); db.session.commit()
+    return redirect(url_for('playbooks'))
+
 
 @app.route('/api/rules', methods=['POST'])
 def api_add_rule():

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Auto SecOps</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d0b17;
+        }
+        .bg-custom-dark {
+            background-color: #0b0717;
+        }
+        .bg-gray-900 {
+            background-color: #0d0b17;
+        }
+        .bg-gray-800 {
+            background-color: #1a1a2e;
+        }
+        .text-purple-400 {
+            color: #b388ff;
+        }
+        .focus\:border-purple-500:focus {
+            border-color: #9333ea;
+        }
+        .focus\:ring-purple-900:focus {
+            --tw-ring-color: #6d28d9;
+        }
+        .hover\:bg-purple-600:hover {
+            background-color: #7c3aed;
+        }
+        
+        .table-dark-custom {
+            background-color: #1a1a2e;
+            color: #e5e7eb;
+        }
+        .table-dark-custom th, .table-dark-custom td {
+            border-color: #374151;
+            background-color: #1a1a2e !important;
+            color: #e5e7eb !important;
+        }
+        .table-dark-custom tbody tr:hover {
+            background-color: #374151 !important;
+        }
+        .form-control.bg-gray-800 {
+            background-color: #1a1a2e !important;
+            color: #e5e7eb !important;
+            border-color: #374151 !important;
+        }
+        .form-control.bg-gray-800::placeholder {
+            color: #9ca3af;
+        }
+    </style>
+</head>
+<body>
+    <div class="fixed top-0 left-0 w-full z-50">
+        <header class="text-white body-font bg-custom-dark">
+            <div class="container mx-auto flex p-5 items-center justify-between">
+                <a class="flex items-center text-white">
+                    <span class="ml-3 text-xl font-bold">FlaskSIEM</span>
+                </a>
+                <nav class="md:ml-auto flex flex-wrap items-center text-base justify-center">
+                    <a href="/" class="mr-5 hover:text-purple-400 cursor-pointer transition-colors">Home</a>
+                    <a href="/logs" class="mr-5 hover:text-purple-400 cursor-pointer transition-colors">Logs</a>
+                    <a href="/playbooks" class="mr-5 hover:text-purple-400 cursor-pointer transition-colors">Playbooks</a>
+                </nav>
+            </div>
+        </header>
+    </div>
+
+    <main class="min-h-screen bg-gray-900 pt-24">
+        <section id="home" class="text-gray-400 body-font">
+            <div class="container mx-auto flex px-5 py-24 items-center justify-center flex-col">
+                <h1 class="title-font sm:text-4xl text-3xl mb-4 font-bold text-white text-center">
+                    Auto SecOps Dashboard
+                </h1>
+                <p class="mb-8 leading-relaxed text-center text-lg text-gray-400 max-w-xl">
+                    Security events at a glance.
+                </p>
+
+                <!-- Action Buttons -->
+                <div class="flex flex-wrap justify-center items-center space-x-4 mb-8">
+                    <form action="/clear_notes" method="post">
+                        <button type="submit" class="text-white bg-red-500 border-0 py-2 px-6 focus:outline-none hover:bg-red-600 rounded text-lg">Clear Notes</button>
+                    </form>
+                    <form action="/rules/reload" method="post">
+                        <button type="submit" class="text-white bg-purple-500 border-0 py-2 px-6 focus:outline-none hover:bg-purple-600 rounded text-lg">Reload YARA</button>
+                    </form>
+                    <form action="/ingest" method="post">
+                        <button type="submit" class="text-white bg-gray-600 border-0 py-2 px-6 focus:outline-none hover:bg-gray-700 rounded text-lg">Ingest</button>
+                    </form>
+                </div>
+                
+                <!-- Alerts Table -->
+                <div class="w-full lg:w-4/5 mx-auto">
+                    <h2 class="text-2xl font-bold text-white mb-4">Alerts</h2>
+                    <table class="table w-full table-dark-custom">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Rule/Signature</th>
+                                <th>Count</th>
+                                <th>First Seen</th>
+                                <th>Last Seen</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for alert in alerts %}
+                            <tr>
+                                <td>{{ alert.id }}</td>
+                                <td>{{ alert.yara_rule_name }} / <span class="text-purple-400">{{ alert.display_sig }}</span></td>
+                                <td>{{ alert.count }}</td>
+                                <td>{{ alert.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                                <td>{{ alert.last_seen.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                                <td><a href="/alert/{{ alert.id }}" class="text-purple-400 hover:text-purple-300">View</a></td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    {% if not alerts %}
+                    <p class="text-center text-gray-500 mt-4">No alerts found.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="text-gray-400 bg-gray-800 body-font">
+        <div class="container px-5 py-8 mx-auto flex items-center sm:flex-row flex-col">
+            <a class="flex title-font font-medium items-center md:justify-start justify-center text-white">
+                <span class="ml-3 text-xl">FlaskSIEM</span>
+            </a>
+            <p class="text-sm text-gray-400 sm:ml-4 sm:pl-4 sm:border-l-2 sm:border-gray-800 sm:py-2 sm:mt-0 mt-4">
+                © 2023 FlaskSIEM
+            </p>
+            <span class="inline-flex sm:ml-auto sm:mt-0 mt-4 justify-center sm:justify-start">
+                <a class="text-gray-400">
+                    <svg fill="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="w-5 h-5" viewBox="0 0 24 24">
+                        <path d="M18 2h-3a5 5 0 00-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 011-1h3z"></path>
+                    </svg>
+                </a>
+                <a class="ml-3 text-gray-400">
+                    <svg fill="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="w-5 h-5" viewBox="0 0 24 24">
+                        <path d="M23 3a10.9 10.9 0 01-3.14 1.53 4.48 4.48 0 00-7.86 3v1A10.66 10.66 0 013 4s-4 9 5 13a11.64 11.64 0 01-7 2c9 5 20 0 20-11.5a4.5 4.5 0 00-.08-.83A7.72 7.72 0 0023 3z"></path>
+                    </svg>
+                </a>
+                <a class="ml-3 text-gray-400">
+                    <svg fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="w-5 h-5" viewBox="0 0 24 24">
+                        <rect width="20" height="20" x="2" y="2" rx="5" ry="5"></rect>
+                        <path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37zm1.5-4.87h.01"></path>
+                    </svg>
+                </a>
+                <a class="ml-3 text-gray-400">
+                    <svg fill="currentColor" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="0" class="w-5 h-5" viewBox="0 0 24 24">
+                        <path stroke="none" d="M16 8a6 6 0 016 6v7h-4v-7a2 2 0 00-2-2 2 2 0 00-2 2v7h-4v-7a6 6 0 016-6zM2 9h4v12H2z"></path>
+                        <circle cx="4" cy="4" r="2" stroke="none"></circle>
+                    </svg>
+                </a>
+            </span>
+        </div>
+    </footer>
+</body>
+</html>
