@@ -1,7 +1,7 @@
-Flask SIEM: A Simple Security Information and Event Management Tool
+AutoSecOps: A Simple Security Information and Event Management Tool
 Project Overview
 
-Flask SIEM is a lightweight Security Information and Event Management (SIEM) tool built with Python and Flask. This single-file application is designed for educational and small-scale use cases, allowing you to ingest and analyze log data to detect potential security threats.
+AutoSecOps is a lightweight Security Information and Event Management (SIEM) tool built with Python and Flask. This single-file application is designed for educational and small-scale use cases, allowing you to ingest and analyze log data to detect potential security threats.
 
 The core functionality includes:
 

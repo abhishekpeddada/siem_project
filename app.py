@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Flask SIEM single-file app — final fixed version.
+AutoSecOps single-file app — final fixed version.
 
 - Put .yar/.yara files into ./rules/
 - Put logs (one event per line) into ./logs/
@@ -177,7 +177,8 @@ def get_log_signature(log_data, rule_meta, rule_strings, rule_name):
             pass
 
     if not sig:
-        sig = md5hex(log_data)[:16]
+        # Fallback to a signature based on the rule name itself for non-correlated single events
+        sig = rule_name
     
     return sig
 
@@ -577,8 +578,6 @@ def analyze(alert_id):
     except Exception as e:
         output = f"Error calling Google API: {e}"
         
-    # 🛠️ FIXED: The notes are now completely replaced instead of appended.
-    # This is what you requested to avoid duplicate analysis reports.
     new_note = f"<strong>Last Updated: {dt.datetime.now(dt.timezone.utc).isoformat()}</strong>\n\n" + output
     a.notes = new_note
     db.session.commit()

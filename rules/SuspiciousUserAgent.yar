@@ -6,6 +6,7 @@ rule SuspiciousUserAgent
     severity = "medium"
     threshold = "1"
     window_seconds = "3600"
+    group_by_regex = "src_ip=([0-9]{1,3}(\\.[0-9]{1,3}){3})"
 
   strings:
     // Common Python libraries
@@ -20,7 +21,8 @@ rule SuspiciousUserAgent
     $curl = "curl/"
     $wget = "Wget/"
     $go = "Go-http-client"
+    $java = "java"
 
   condition:
-    1 of ($python*) or 1 of ($node*) or 1 of ($curl, $wget, $go)
+    1 of ($python*) or 1 of ($node*) or 1 of ($curl, $wget, $go, $java)
 }
