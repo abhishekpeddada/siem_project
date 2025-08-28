@@ -84,12 +84,6 @@ class AlertLog(db.Model):
     log_id = db.Column(db.Integer, db.ForeignKey('log.id'))
     created_at = db.Column(db.DateTime, default=now_utc)
 
-class Playbook(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(200))
-    steps = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=now_utc)
-    
 class ProcessedFile(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(255), unique=True, nullable=False)
@@ -501,7 +495,7 @@ def reprocess_logs():
     return jsonify({"reprocessed_logs": len(logs), "affected_logs": count})
 
 # --------------------
-# UI (dashboard, alerts, logs, playbooks)
+# UI (dashboard, alerts, logs)
 # --------------------
 @app.route('/')
 def dashboard():
@@ -580,10 +574,6 @@ def analyze(alert_id):
         except Exception as e:
             ai_response = f"Error calling Google API: {e}"
         
-    new_note = f"<strong>Last Updated: {dt.datetime.now(dt.timezone.utc).isoformat()}</strong>\n\n" + ai_response
-    a.notes = new_note
-    db.session.commit()
-    
     return redirect(url_for('alert_view', alert_id=alert_id))
 
 @app.route('/chat/<int:alert_id>', methods=['POST'])
@@ -677,20 +667,6 @@ def view_logs():
     
     return render_template('logs.html', logs=logs, q=q)
 
-@app.route('/playbooks')
-def playbooks():
-    pls = Playbook.query.order_by(Playbook.id.desc()).all()
-    return render_template('playbooks.html', playbooks=pls)
-
-@app.route('/playbooks/add', methods=['POST'])
-def add_playbook():
-    name = request.form.get('name')
-    steps = request.form.get('steps')
-    p = Playbook(name=name, steps=steps)
-    db.session.add(p); db.session.commit()
-    return redirect(url_for('playbooks'))
-
-
 @app.route('/api/rules', methods=['POST'])
 def api_add_rule():
     data = request.json or {}
@@ -701,22 +677,6 @@ def api_add_rule():
     r = Rule(name=name, pattern=pattern)
     db.session.add(r); db.session.commit()
     return jsonify({'ok': True, 'id': r.id})
-
-# --------------------
-# New endpoint to clear notes
-# --------------------
-@app.route('/clear_notes', methods=['POST'])
-def clear_notes():
-    """
-    Clears all notes from the Alert table.
-    """
-    try:
-        db.session.query(Alert).update({Alert.notes: ''}, synchronize_session=False)
-        db.session.commit()
-        return redirect(url_for('dashboard'))
-    except Exception as e:
-        db.session.rollback()
-        return f"An error occurred: {str(e)}", 500
 
 # --------------------
 # Run
