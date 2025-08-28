@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AutoSecOps single-file app — final fixed version.
+Flask SIEM single-file app — final fixed version.
 
 - Put .yar/.yara files into ./rules/
 - Put logs (one event per line) into ./logs/
@@ -177,8 +177,7 @@ def get_log_signature(log_data, rule_meta, rule_strings, rule_name):
             pass
 
     if not sig:
-        # Fallback to a signature based on the rule name itself for non-correlated single events
-        sig = rule_name
+        sig = md5hex(log_data)[:16]
     
     return sig
 
@@ -514,14 +513,20 @@ def alert_view(alert_id):
 @app.route('/analyze/<int:alert_id>', methods=['GET'])
 def analyze(alert_id):
     a = Alert.query.get_or_404(alert_id)
-    links = AlertLog.query.filter_by(alert_id=alert_id).order_by(AlertLog.created_at.desc()).limit(5).all()
-    texts = []
-    for l in links:
-        log = Log.query.get(l.log_id)
-        texts.append(log.raw)
+    
+    # 🛠️ FIXED: Logic to get a wider range of logs
+    time_start = a.first_seen - dt.timedelta(hours=12)
+    time_end = a.last_seen + dt.timedelta(hours=12)
+
+    related_logs = Log.query.filter(
+        Log.created_at.between(time_start, time_end),
+        Log.raw.contains(a.display_sig)
+    ).order_by(Log.created_at.asc()).all()
+
+    all_logs_for_ai = "\n".join(set([log.raw for log in related_logs]))
 
     predefined_prompt = """
-    Assume you are a seasoned Cybersecurity Analyst. Analyze the logs provided and deliver a professional incident report in the following structure:
+    Assume you are a seasoned Cybersecurity Analyst. Your task is to analyze an incident using a provided set of logs. The primary alert is in the logs, but you also have surrounding and historical logs for a broader context. Your analysis must provide a professional incident report in the following structure:
 
     Observations:
     Identify suspicious or notable activities, abnormal patterns, or policy violations from the logs.
@@ -529,7 +534,8 @@ def analyze(alert_id):
 
     Impact Assessment:
     Explain the potential or confirmed security risks of the observed activity (e.g., data exfiltration, privilege escalation, lateral movement, external exposure).
-    Clarify whether this is a critical, high, medium, or low severity issue.
+    Clarify whether this is a true positive or a false positive based on the evidence.
+    Assign a severity level: critical, high, medium, or low.
 
     Recommendations:
     Provide clear, actionable security measures (technical and procedural) to mitigate or prevent similar events.
@@ -540,7 +546,7 @@ def analyze(alert_id):
     Keep it concise, executive-ready, and suitable for SOC handover reports.
     """
 
-    prompt = predefined_prompt + "\n\nLogs to analyze:\n" + "\n".join(texts)
+    prompt = predefined_prompt + "\n\nLogs to analyze:\n" + all_logs_for_ai
 
     if not GOOGLE_API_KEY:
         return "Google API key not configured. Set GOOGLE_API_KEY env var.", 400
