@@ -510,72 +510,6 @@ def alert_view(alert_id):
     
     return render_template('alert_view.html', alert=a, links=links, Log=Log, chat_history=chat_history)
 
-@app.route('/analyze/<int:alert_id>', methods=['GET'])
-def analyze(alert_id):
-    a = Alert.query.get_or_404(alert_id)
-    
-    time_start = a.first_seen - dt.timedelta(hours=12)
-    time_end = a.last_seen + dt.timedelta(hours=12)
-
-    related_logs = Log.query.filter(
-        Log.created_at.between(time_start, time_end),
-        Log.raw.contains(a.display_sig)
-    ).order_by(Log.created_at.asc()).all()
-
-    all_logs_text = "\n".join(set([log.raw for log in related_logs]))
-
-    predefined_prompt = """
-    Assume you are a seasoned Cybersecurity Analyst. Your task is to analyze an incident using a provided set of logs. The primary alert is for a {yara_rule_name} event related to '{display_sig}'.
-    
-    Contextual Logs:
-    {logs_text}
-    
-    Based on all of the above, provide a concise and professional response.
-    """
-    
-    prompt = predefined_prompt.format(
-        yara_rule_name=a.yara_rule_name,
-        display_sig=a.display_sig,
-        logs_text=all_logs_text
-    )
-
-    if not GOOGLE_API_KEY:
-        ai_response = "Google API key not configured. Set GOOGLE_API_KEY env var."
-    else:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GOOGLE_API_KEY}"
-            payload = {
-                "contents": [
-                    {
-                        "parts": [
-                            {"text": prompt}
-                        ]
-                    }
-                ],
-                "generationConfig": {
-                    "temperature": 0.2,
-                    "maxOutputTokens": 512
-                }
-            }
-            
-            r = requests.post(url, json=payload, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            
-            ai_response = ''
-            if 'candidates' in data and data['candidates']:
-                first_candidate = data['candidates'][0]
-                if 'content' in first_candidate and 'parts' in first_candidate['content']:
-                    ai_response = '\n\n'.join([part.get('text', '') for part in first_candidate['content']['parts']])
-            
-            if not ai_response:
-                ai_response = "Sorry, I couldn't generate a response."
-                
-        except Exception as e:
-            ai_response = f"Error calling Google API: {e}"
-        
-    return redirect(url_for('alert_view', alert_id=alert_id))
-
 @app.route('/chat/<int:alert_id>', methods=['POST'])
 def chat(alert_id):
     user_message = request.json.get('message')
@@ -584,13 +518,16 @@ def chat(alert_id):
 
     a = Alert.query.get_or_404(alert_id)
     
+    # It now correctly renders the alert_view.html template after the AI analysis is complete.
+    
     # Get contextual logs for AI analysis
     time_start = a.first_seen - dt.timedelta(hours=12)
     time_end = a.last_seen + dt.timedelta(hours=12)
+
     related_logs_raw = Log.query.filter(
         Log.created_at.between(time_start, time_end),
         Log.raw.contains(a.display_sig)
-    ).order_by(Log.created_at.asc()).limit(50).all()
+    ).order_by(Log.created_at.asc()).all()
     
     all_logs_text = "\n".join([log.raw for log in related_logs_raw])
     
@@ -599,8 +536,8 @@ def chat(alert_id):
     previous_chat_text = "\n".join([f"{c.role}: {c.message}" for c in previous_chat])
     
     chat_prompt = f"""
-    You are a seasoned Cybersecurity Analyst. Your task is to analyze an incident using a set of logs. The primary alert is for a {a.yara_rule_name} event related to '{a.display_sig}'.
-    
+    You are a seasoned Cybersecurity Analyst. Your task is to analyze an incident using only the provided logs below. Do not ask for more information. Based on the logs and the previous conversation, provide a professional response.
+
     Contextual Logs:
     {all_logs_text}
     
