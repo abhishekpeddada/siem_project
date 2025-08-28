@@ -39,6 +39,11 @@
         }
         .table-dark-custom th, .table-dark-custom td {
             border-color: #374151;
+            background-color: #1a1a2e !important;
+            color: #e5e7eb !important;
+        }
+        .table-dark-custom tbody tr:hover {
+            background-color: #374151 !important;
         }
     </style>
 </head>
@@ -47,7 +52,8 @@
         <header class="text-white body-font bg-custom-dark">
             <div class="container mx-auto flex p-5 items-center justify-between">
                 <a class="flex items-center text-white">
-                    <span class="ml-3 text-xl font-bold">Auto SecOps</span>
+                    <img src="https://placehold.co/40x40/5c5c8a/FFFFFF" alt="Logo" class="w-10 h-10 rounded-full">
+                    <span class="ml-3 text-xl font-bold">AutoSecOps</span>
                 </a>
                 <nav class="md:ml-auto flex flex-wrap items-center text-base justify-center">
                     <a href="/" class="mr-5 hover:text-purple-400 cursor-pointer transition-colors">Home</a>
@@ -66,9 +72,8 @@
                     <p class="mb-2"><strong>Rule:</strong> {{ alert.yara_rule_name or alert.rule_id or 'N/A' }}</p>
                     <p class="mb-2"><strong>Count:</strong> {{ alert.count }}</p>
                     <p class="mb-2"><strong>Signature:</strong> {{ alert.display_sig or alert.yara_rule_name or 'N/A' }}</p>
-                    <p class="mb-2"><strong>First Seen:</strong> {{ alert.first_seen }}</p>
-                    <p class="mb-2"><strong>Last Seen:</strong> {{ alert.last_seen }}</p>
-                    <a href="/analyze/{{ alert.id }}" class="mt-4 inline-block text-white bg-purple-500 border-0 py-2 px-6 focus:outline-none hover:bg-purple-600 rounded text-lg">Analyze with Google AI</a>
+                    <p class="mb-2"><strong>First Seen:</strong> {{ alert.first_seen.strftime('%Y-%m-%d %H:%M:%S') }}</p>
+                    <p class="mb-2"><strong>Last Seen:</strong> {{ alert.last_seen.strftime('%Y-%m-%d %H:%M:%S') }}</p>
                 </div>
 
                 <h3 class="text-2xl font-bold text-white mb-4">Recent Logs</h3>
@@ -85,9 +90,19 @@
                 {% endif %}
                 {% endfor %}
 
-                <h3 class="text-2xl font-bold text-white mt-8 mb-4">Notes</h3>
-                <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
-                    <div class="text-gray-200" style="white-space: pre-wrap;">{{ alert.notes | safe }}</div>
+                <h3 class="text-2xl font-bold text-white mt-8 mb-4">AI Analyst Chat</h3>
+                <div class="bg-gray-800 p-6 rounded-lg shadow-lg flex flex-col h-96">
+                    <div id="chat-messages" class="flex-grow overflow-y-auto mb-4">
+                        {% for chat in chat_history %}
+                        <div class="mb-2 p-2 rounded-lg {% if chat.role == 'user' %}bg-purple-900 text-white{% else %}bg-gray-700 text-gray-200{% endif %}">
+                            <strong>{{ chat.role }}:</strong> {{ chat.message }}
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <form id="chat-form" class="flex">
+                        <input type="text" id="chat-input" name="message" placeholder="Ask the AI about this alert..." class="flex-grow bg-gray-900 rounded border border-gray-700 focus:border-purple-500 text-base outline-none text-gray-100 py-1 px-3 leading-8 transition-colors duration-200 ease-in-out" required>
+                        <button type="submit" class="ml-4 text-white bg-purple-500 border-0 py-2 px-6 focus:outline-none hover:bg-purple-600 rounded text-lg">Send</button>
+                    </form>
                 </div>
             </div>
         </section>
@@ -96,10 +111,10 @@
     <footer class="text-gray-400 bg-gray-800 body-font mt-auto">
         <div class="container px-5 py-8 mx-auto flex items-center sm:flex-row flex-col">
             <a class="flex title-font font-medium items-center md:justify-start justify-center text-white">
-                <span class="ml-3 text-xl">Auto SecOps</span>
+                <span class="ml-3 text-xl">AutoSecOps</span>
             </a>
             <p class="text-sm text-gray-400 sm:ml-4 sm:pl-4 sm:border-l-2 sm:border-gray-800 sm:py-2 sm:mt-0 mt-4">
-                © 2023 Auto SecOps
+                © 2023 AutoSecOps
             </p>
             <span class="inline-flex sm:ml-auto sm:mt-0 mt-4 justify-center sm:justify-start">
                 <a class="text-gray-400">
@@ -127,5 +142,67 @@
             </span>
         </div>
     </footer>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const chatForm = document.getElementById('chat-form');
+            const chatInput = document.getElementById('chat-input');
+            const chatMessages = document.getElementById('chat-messages');
+            const alertId = window.location.pathname.split('/').pop();
+
+            chatForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const message = chatInput.value;
+                if (!message) return;
+
+                // Display user message
+                appendMessage(message, 'user');
+                chatInput.value = '';
+
+                // Display AI thinking message
+                const loadingMessage = appendMessage('AI is thinking...', 'ai');
+
+                try {
+                    const response = await fetch(`/chat/${alertId}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ message: message })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        // Update loading message with AI response
+                        loadingMessage.textContent = 'AI: ' + data.ai_response;
+                    } else {
+                        throw new Error('Failed to get AI response.');
+                    }
+                } catch (error) {
+                    loadingMessage.textContent = 'AI: Sorry, an error occurred. Please try again.';
+                    console.error('Chat error:', error);
+                } finally {
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+            });
+
+            function appendMessage(text, role) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `mb-2 p-2 rounded-lg ${role === 'user' ? 'bg-purple-900 text-white' : 'bg-gray-700 text-gray-200'}`;
+                
+                const roleSpan = document.createElement('strong');
+                roleSpan.textContent = role.charAt(0).toUpperCase() + role.slice(1) + ': ';
+                
+                const textNode = document.createTextNode(text);
+                
+                messageDiv.appendChild(roleSpan);
+                messageDiv.appendChild(textNode);
+                
+                chatMessages.appendChild(messageDiv);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                
+                return messageDiv;
+            }
+        });
+    </script>
 </body>
 </html>

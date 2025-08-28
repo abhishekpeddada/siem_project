@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-Flask SIEM single-file app — final fixed version.
 
 - Put .yar/.yara files into ./rules/
 - Put logs (one event per line) into ./logs/
@@ -77,7 +76,6 @@ class Alert(db.Model):
     first_seen = db.Column(db.DateTime, default=now_utc)
     last_seen = db.Column(db.DateTime, default=now_utc)
     sample_log_id = db.Column(db.Integer, db.ForeignKey('log.id'), nullable=True)
-    notes = db.Column(db.Text)
     display_sig = db.Column(db.String(255), nullable=True)
 
 class AlertLog(db.Model):
@@ -96,6 +94,13 @@ class ProcessedFile(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(255), unique=True, nullable=False)
     processed_at = db.Column(db.DateTime, default=now_utc)
+
+class ChatHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    alert_id = db.Column(db.Integer, db.ForeignKey('alert.id'), nullable=False)
+    role = db.Column(db.String(10), nullable=False) # 'user' or 'ai'
+    message = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=now_utc)
 
 with app.app_context():
     db.create_all()
@@ -177,7 +182,7 @@ def get_log_signature(log_data, rule_meta, rule_strings, rule_name):
             pass
 
     if not sig:
-        sig = md5hex(log_data)[:16]
+        sig = rule_name
     
     return sig
 
@@ -507,14 +512,14 @@ def dashboard():
 def alert_view(alert_id):
     a = Alert.query.get_or_404(alert_id)
     links = AlertLog.query.filter_by(alert_id=alert_id).order_by(AlertLog.created_at.desc()).limit(50).all()
+    chat_history = ChatHistory.query.filter_by(alert_id=alert_id).order_by(ChatHistory.timestamp.asc()).all()
     
-    return render_template('alert_view.html', alert=a, links=links, Log=Log)
+    return render_template('alert_view.html', alert=a, links=links, Log=Log, chat_history=chat_history)
 
 @app.route('/analyze/<int:alert_id>', methods=['GET'])
 def analyze(alert_id):
     a = Alert.query.get_or_404(alert_id)
     
-    # 🛠️ FIXED: Logic to get a wider range of logs
     time_start = a.first_seen - dt.timedelta(hours=12)
     time_end = a.last_seen + dt.timedelta(hours=12)
 
@@ -523,72 +528,144 @@ def analyze(alert_id):
         Log.raw.contains(a.display_sig)
     ).order_by(Log.created_at.asc()).all()
 
-    all_logs_for_ai = "\n".join(set([log.raw for log in related_logs]))
+    all_logs_text = "\n".join(set([log.raw for log in related_logs]))
 
     predefined_prompt = """
-    Assume you are a seasoned Cybersecurity Analyst. Your task is to analyze an incident using a provided set of logs. The primary alert is in the logs, but you also have surrounding and historical logs for a broader context. Your analysis must provide a professional incident report in the following structure:
-
-    Observations:
-    Identify suspicious or notable activities, abnormal patterns, or policy violations from the logs.
-    Highlight user accounts, IP addresses, devices, or applications involved.
-
-    Impact Assessment:
-    Explain the potential or confirmed security risks of the observed activity (e.g., data exfiltration, privilege escalation, lateral movement, external exposure).
-    Clarify whether this is a true positive or a false positive based on the evidence.
-    Assign a severity level: critical, high, medium, or low.
-
-    Recommendations:
-    Provide clear, actionable security measures (technical and procedural) to mitigate or prevent similar events.
-    Mention immediate containment steps if needed.
-
-    Summary (Highlights):
-    Bullet-point the major red flags and key takeaways that stakeholders must pay attention to.
-    Keep it concise, executive-ready, and suitable for SOC handover reports.
+    Assume you are a seasoned Cybersecurity Analyst. Your task is to analyze an incident using a provided set of logs. The primary alert is for a {yara_rule_name} event related to '{display_sig}'.
+    
+    Contextual Logs:
+    {logs_text}
+    
+    Based on all of the above, provide a concise and professional response.
     """
-
-    prompt = predefined_prompt + "\n\nLogs to analyze:\n" + all_logs_for_ai
+    
+    prompt = predefined_prompt.format(
+        yara_rule_name=a.yara_rule_name,
+        display_sig=a.display_sig,
+        logs_text=all_logs_text
+    )
 
     if not GOOGLE_API_KEY:
-        return "Google API key not configured. Set GOOGLE_API_KEY env var.", 400
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GOOGLE_API_KEY}"
-    
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt}
-                ]
+        ai_response = "Google API key not configured. Set GOOGLE_API_KEY env var."
+    else:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GOOGLE_API_KEY}"
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": prompt}
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 512
+                }
             }
-        ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 512
-        }
-    }
-
-    try:
-        r = requests.post(url, json=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-
-        output = ''
-        if 'candidates' in data and data['candidates']:
-            first_candidate = data['candidates'][0]
-            if 'content' in first_candidate and 'parts' in first_candidate['content']:
-                output = '\n\n'.join([part.get('text', '') for part in first_candidate['content']['parts']])
-
-        if not output:
-            output = json.dumps(data, indent=2)
-
-    except Exception as e:
-        output = f"Error calling Google API: {e}"
+            
+            r = requests.post(url, json=payload, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            
+            ai_response = ''
+            if 'candidates' in data and data['candidates']:
+                first_candidate = data['candidates'][0]
+                if 'content' in first_candidate and 'parts' in first_candidate['content']:
+                    ai_response = '\n\n'.join([part.get('text', '') for part in first_candidate['content']['parts']])
+            
+            if not ai_response:
+                ai_response = "Sorry, I couldn't generate a response."
+                
+        except Exception as e:
+            ai_response = f"Error calling Google API: {e}"
         
-    new_note = f"<strong>Last Updated: {dt.datetime.now(dt.timezone.utc).isoformat()}</strong>\n\n" + output
+    new_note = f"<strong>Last Updated: {dt.datetime.now(dt.timezone.utc).isoformat()}</strong>\n\n" + ai_response
     a.notes = new_note
     db.session.commit()
     
     return redirect(url_for('alert_view', alert_id=alert_id))
+
+@app.route('/chat/<int:alert_id>', methods=['POST'])
+def chat(alert_id):
+    user_message = request.json.get('message')
+    if not user_message:
+        return jsonify({'error': 'No message provided'}), 400
+
+    a = Alert.query.get_or_404(alert_id)
+    
+    # Get contextual logs for AI analysis
+    time_start = a.first_seen - dt.timedelta(hours=12)
+    time_end = a.last_seen + dt.timedelta(hours=12)
+    related_logs_raw = Log.query.filter(
+        Log.created_at.between(time_start, time_end),
+        Log.raw.contains(a.display_sig)
+    ).order_by(Log.created_at.asc()).limit(50).all()
+    
+    all_logs_text = "\n".join([log.raw for log in related_logs_raw])
+    
+    # Get previous chat history for multi-turn conversation
+    previous_chat = ChatHistory.query.filter_by(alert_id=alert_id).order_by(ChatHistory.timestamp.asc()).all()
+    previous_chat_text = "\n".join([f"{c.role}: {c.message}" for c in previous_chat])
+    
+    chat_prompt = f"""
+    You are a seasoned Cybersecurity Analyst. Your task is to analyze an incident using a set of logs. The primary alert is for a {a.yara_rule_name} event related to '{a.display_sig}'.
+    
+    Contextual Logs:
+    {all_logs_text}
+    
+    Previous Conversation:
+{previous_chat_text}
+    
+    User Question: {user_message}
+    
+    Based on all of the above, provide a concise and professional response.
+    """
+
+    # Save user message to chat history
+    user_chat = ChatHistory(alert_id=alert_id, role='user', message=user_message)
+    db.session.add(user_chat); db.session.commit()
+
+    if not GOOGLE_API_KEY:
+        ai_response = "Google API key not configured. Set GOOGLE_API_KEY env var."
+    else:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GOOGLE_API_KEY}"
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": chat_prompt}
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 512
+                }
+            }
+
+            r = requests.post(url, json=payload, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            
+            ai_response = ''
+            if 'candidates' in data and data['candidates']:
+                first_candidate = data['candidates'][0]
+                if 'content' in first_candidate and 'parts' in first_candidate['content']:
+                    ai_response = '\n\n'.join([part.get('text', '') for part in first_candidate['content']['parts']])
+            
+            if not ai_response:
+                ai_response = "Sorry, I couldn't generate a response."
+                
+        except Exception as e:
+            ai_response = f"Error calling Google API: {e}"
+
+    # Save AI response to chat history
+    ai_chat = ChatHistory(alert_id=alert_id, role='ai', message=ai_response)
+    db.session.add(ai_chat); db.session.commit()
+
+    return jsonify({'ai_response': ai_response})
 
 @app.route('/logs')
 def view_logs():
