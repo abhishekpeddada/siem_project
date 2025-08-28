@@ -1,6 +1,0 @@
-2025-08-25 12:01:05 AUTH_FAIL user=abhix202 src_ip=192.168.1.100 dst_ip=10.0.0.5 reason=invalid_password
-2025-08-25 12:01:10 AUTH_FAIL user=abhix202 src_ip=192.168.1.100 dst_ip=10.0.0.5 reason=invalid_password
-2025-08-25 12:01:15 AUTH_FAIL user=abhix202 src_ip=192.168.1.100 dst_ip=10.0.0.5 reason=invalid_password
-2025-08-25 12:01:20 AUTH_FAIL user=abhix202 src_ip=192.168.1.100 dst_ip=10.0.0.5 reason=invalid_password
-2025-08-25 12:01:25 AUTH_FAIL user=abhix202 src_ip=192.168.1.100 dst_ip=10.0.0.5 reason=invalid_password
-2025-08-25 12:01:25 SUCCESS user=abhix202 src_ip=192.168.1.100 dst_ip=10.0.0.5 reason=MFA

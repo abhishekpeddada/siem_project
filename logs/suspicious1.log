@@ -1,5 +1,0 @@
-2025-08-25 11:42:28 http_access src_ip=203.0.113.10 endpoint=/login status=401 user_agent="java" user=naga
-2025-08-25 11:42:30 http_access src_ip=203.0.113.10 endpoint=/api status=200 user_agent="java" user=naga
-2025-08-25 11:42:32 http_access src_ip=203.0.113.11 endpoint=/dashboard status=403 user_agent="java" user=naga
-2025-08-25 11:42:35 http_access src_ip=203.0.113.12 endpoint=/data status=404 user_agent="java" user=naga
-2025-08-25 11:42:38 http_access src_ip=203.0.113.13 endpoint=/admin status=401 user_agent="java" user=naga
