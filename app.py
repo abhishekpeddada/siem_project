@@ -18,6 +18,7 @@ import datetime as dt
 import yara
 import requests
 from dotenv import load_dotenv
+import markdown2
 
 import threading
 import time
@@ -44,6 +45,11 @@ app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DB_PATH}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
+
+def markdown_filter(s):
+    return markdown2.markdown(s)
+
+app.jinja_env.filters['markdown'] = markdown_filter
 
 # --------------------
 # DB Models & helpers
@@ -83,7 +89,7 @@ class AlertLog(db.Model):
     alert_id = db.Column(db.Integer, db.ForeignKey('alert.id'))
     log_id = db.Column(db.Integer, db.ForeignKey('log.id'))
     created_at = db.Column(db.DateTime, default=now_utc)
-
+    
 class ProcessedFile(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(255), unique=True, nullable=False)
@@ -517,10 +523,13 @@ def chat(alert_id):
         return jsonify({'error': 'No message provided'}), 400
 
     a = Alert.query.get_or_404(alert_id)
-    
-    # It now correctly renders the alert_view.html template after the AI analysis is complete.
-    
-    # Get contextual logs for AI analysis
+    links = AlertLog.query.filter_by(alert_id=alert_id).order_by(AlertLog.created_at.desc()).limit(5).all()
+    texts = []
+    for l in links:
+        log = Log.query.get(l.log_id)
+        texts.append(log.raw)
+    print(links)
+    print(texts)
     time_start = a.first_seen - dt.timedelta(hours=12)
     time_end = a.last_seen + dt.timedelta(hours=12)
 
@@ -531,14 +540,14 @@ def chat(alert_id):
     
     all_logs_text = "\n".join([log.raw for log in related_logs_raw])
     
-    # Get previous chat history for multi-turn conversation
     previous_chat = ChatHistory.query.filter_by(alert_id=alert_id).order_by(ChatHistory.timestamp.asc()).all()
     previous_chat_text = "\n".join([f"{c.role}: {c.message}" for c in previous_chat])
     
     chat_prompt = f"""
-    You are a seasoned Cybersecurity Analyst. Your task is to analyze an incident using only the provided logs below. Do not ask for more information. Based on the logs and the previous conversation, provide a professional response.
-
-    Contextual Logs:
+Your task is to analyze current logs of an incident first using only the provided logs below and then proceed analysing previous logs and the ongoing conversation. You must not ask for more logs or information.
+   current logs:
+    {texts}
+   previous Logs:
     {all_logs_text}
     
     Previous Conversation:
@@ -546,10 +555,13 @@ def chat(alert_id):
     
     User Question: {user_message}
     
-    Based on all of the above, provide a concise and professional response.
-    """
+Task:
+Analyze the contextual logs in relation to the user’s question and previous conversation.  
 
-    # Save user message to chat history
+Respond with {user_message}:  
+Format your response clearly with bullet points or short paragraphs for readability. Avoid vague statements; ensure each point is backed by log evidence and reasoning.
+"""
+
     user_chat = ChatHistory(alert_id=alert_id, role='user', message=user_message)
     db.session.add(user_chat); db.session.commit()
 
@@ -588,7 +600,6 @@ def chat(alert_id):
         except Exception as e:
             ai_response = f"Error calling Google API: {e}"
 
-    # Save AI response to chat history
     ai_chat = ChatHistory(alert_id=alert_id, role='ai', message=ai_response)
     db.session.add(ai_chat); db.session.commit()
 
@@ -615,11 +626,10 @@ def api_add_rule():
     db.session.add(r); db.session.commit()
     return jsonify({'ok': True, 'id': r.id})
 
-# --------------------
-# Run
-# --------------------
 if __name__ == '__main__':
     os.makedirs(STORAGE_PATH, exist_ok=True)
     os.makedirs(RULES_DIR, exist_ok=True)
     start_observer()
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+
+

@@ -88,19 +88,22 @@
                 </div>
                 {% endif %}
                 {% endfor %}
-
+                
                 <h3 class="text-2xl font-bold text-white mt-8 mb-4">AI Analyst Chat</h3>
-                <div class="bg-gray-800 p-6 rounded-lg shadow-lg flex flex-col h-96">
-                    <div id="chat-messages" class="flex-grow overflow-y-auto mb-4">
+                <!-- 🛠️ FIXED: Increased the height of the chat box and improved layout -->
+                <div class="bg-gray-800 p-6 rounded-lg shadow-lg flex flex-col h-[500px]">
+                    <div id="chat-messages" class="flex-grow overflow-y-auto mb-4 p-2">
                         {% for chat in chat_history %}
-                        <div class="mb-2 p-2 rounded-lg {% if chat.role == 'user' %}bg-purple-900 text-white{% else %}bg-gray-700 text-gray-200{% endif %}">
-                            <strong>{{ chat.role }}:</strong> {{ chat.message }}
+                        <!-- 🛠️ FIXED: Dynamic background alignment based on role -->
+                        <div class="mb-2 p-3 rounded-lg {% if chat.role == 'user' %}bg-purple-900 text-white self-end text-left ml-auto{% else %}bg-gray-700 text-gray-200 self-start text-left mr-auto{% endif %}" style="max-width: 80%;">
+                            <strong class="capitalize">{{ chat.role }}:</strong>
+                            <div class="prose prose-sm prose-invert" style="all: revert;">{{ chat.message | markdown | safe }}</div>
                         </div>
                         {% endfor %}
                     </div>
-                    <form id="chat-form" class="flex">
-                        <input type="text" id="chat-input" name="message" placeholder="Ask the AI about this alert..." class="flex-grow bg-gray-900 rounded border border-gray-700 focus:border-purple-500 text-base outline-none text-gray-100 py-1 px-3 leading-8 transition-colors duration-200 ease-in-out" required>
-                        <button type="submit" class="ml-4 text-white bg-purple-500 border-0 py-2 px-6 focus:outline-none hover:bg-purple-600 rounded text-lg">Send</button>
+                    <form id="chat-form" class="flex items-center">
+                        <input type="text" id="chat-input" name="message" placeholder="Ask the AI about this alert..." class="flex-grow bg-gray-900 rounded-lg border border-gray-700 focus:border-purple-500 text-base outline-none text-gray-100 py-2 px-4 transition-colors duration-200 ease-in-out" required>
+                        <button type="submit" class="ml-4 text-white bg-purple-500 border-0 py-2 px-6 focus:outline-none hover:bg-purple-600 rounded-lg text-lg">Send</button>
                     </form>
                 </div>
             </div>
@@ -172,12 +175,12 @@
                     if (response.ok) {
                         const data = await response.json();
                         // Update loading message with AI response
-                        loadingMessage.textContent = 'AI: ' + data.ai_response;
+                        loadingMessage.innerHTML = '<strong>AI:</strong> ' + data.ai_response;
                     } else {
                         throw new Error('Failed to get AI response.');
                     }
                 } catch (error) {
-                    loadingMessage.textContent = 'AI: Sorry, an error occurred. Please try again.';
+                    loadingMessage.innerHTML = '<strong>AI:</strong> Sorry, an error occurred. Please try again.';
                     console.error('Chat error:', error);
                 } finally {
                     chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -186,15 +189,22 @@
 
             function appendMessage(text, role) {
                 const messageDiv = document.createElement('div');
-                messageDiv.className = `mb-2 p-2 rounded-lg ${role === 'user' ? 'bg-purple-900 text-white' : 'bg-gray-700 text-gray-200'}`;
+                messageDiv.className = `mb-2 p-3 rounded-lg ${role === 'user' ? 'bg-purple-900 text-white self-end text-left ml-auto' : 'bg-gray-700 text-gray-200 self-start text-left mr-auto'}`
+                messageDiv.style.maxWidth = '80%';
                 
                 const roleSpan = document.createElement('strong');
                 roleSpan.textContent = role.charAt(0).toUpperCase() + role.slice(1) + ': ';
                 
-                const textNode = document.createTextNode(text);
+                const messageContent = document.createElement('div');
+                if (role === 'ai') {
+                    // Use a library to render markdown
+                    messageContent.innerHTML = text;
+                } else {
+                    messageContent.textContent = text;
+                }
                 
                 messageDiv.appendChild(roleSpan);
-                messageDiv.appendChild(textNode);
+                messageDiv.appendChild(messageContent);
                 
                 chatMessages.appendChild(messageDiv);
                 chatMessages.scrollTop = chatMessages.scrollHeight;
