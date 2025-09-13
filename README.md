@@ -3,6 +3,8 @@ UDM Search & Gemini Chat
 This is a web application that integrates Google Chronicle's Unified Data Model (UDM) search functionality with a Gemini-powered AI chat interface. The application allows users to perform UDM queries and receive human-readable explanations and analysis of the results directly from an AI assistant.
 
 The application is built with a Python Flask backend and a modern, responsive HTML/JavaScript frontend using Tailwind CSS for styling. Chat history is made persistent by storing it in a SQLite database.
+
+
 Features
 
     UDM Search: Submit UDM queries with specified time ranges and limits.
@@ -45,6 +47,7 @@ Getting Started
     python app.py
 
 The application will be running at http://127.0.0.1:5000.
+
 Credits
 
 The core logic for performing the UDM search and handling authentication with the Chronicle API is based on the official Chronicle API Python Samples. Specifically, the real_udm_search function and related authentication boilerplate were adapted from search/udm_search.py.
