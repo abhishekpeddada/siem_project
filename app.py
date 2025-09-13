@@ -6,45 +6,27 @@ import requests
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from typing import Any, Mapping, Optional
+from dotenv import load_dotenv
 
-# Necessary imports for real authentication
 from google.auth.transport import requests as auth_requests
 from google.oauth2 import service_account
 
-# Import the necessary modules from the common directory
 from common import chronicle_auth
 from common import regions
 
+load_dotenv()
+
 app = Flask(__name__)
 
-# SQLAlchemy Configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///udm_searches.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-GEMINI_API_KEY = os.getenv('GOOGLE_API_KEY', '')
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
 UDM_API_BASE_URL = "https://backstory.googleapis.com"
 
-CREDENTIALS_FILE_PATH = os.getenv('CREDENTIALS_FILE_PATH', '')
-
-def get_regional_url(base_url: str, region: str) -> str:
-    """Returns the regional API URL based on the specified region."""
-    if region == "us":
-        return base_url
-    else:
-        return base_url.replace("//", f"//{region}-")
-
-# Helper function for authentication.
-def initialize_http_session(credentials_file_path: str) -> requests.Session:
-    """Initializes and returns an authenticated HTTP session."""
-    try:
-        credentials = service_account.Credentials.from_service_account_file(
-            credentials_file_path,
-            scopes=['https://www.googleapis.com/auth/chronicle-api'])
-        return auth_requests.AuthorizedSession(credentials)
-    except Exception as e:
-        raise Exception(f"Authentication failed: {e}")
+CHRONICLE_CREDENTIALS_PATH = os.environ.get("CHRONICLE_CREDENTIALS_PATH")
 
 # Database Model for Search History
 class Search(db.Model):
@@ -57,17 +39,6 @@ class Search(db.Model):
 
     def __repr__(self):
         return f'<Search {self.query}>'
-
-# New Database Model for Chat History
-class Chat(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    chat_session_id = db.Column(db.String(36), nullable=False)
-    sender = db.Column(db.String(10), nullable=False)  # 'user' or 'ai'
-    message = db.Column(db.Text, nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-
-    def __repr__(self):
-        return f'<Chat {self.chat_session_id}: {self.sender} - {self.timestamp}>'
 
 def real_udm_search(query: str, start_time: datetime.datetime, end_time: datetime.datetime, limit: int) -> Mapping[str, Any]:
     """Performs a UDM search against the real API.
@@ -87,8 +58,11 @@ def real_udm_search(query: str, start_time: datetime.datetime, end_time: datetim
       requests.exceptions.HTTPError: If the API request fails.
     """
     
+    if not CHRONICLE_CREDENTIALS_PATH or not os.path.exists(CHRONICLE_CREDENTIALS_PATH):
+        raise FileNotFoundError(f"Chronicle credentials file not found at path: {CHRONICLE_CREDENTIALS_PATH}. Please set the CHRONICLE_CREDENTIALS_PATH environment variable.")
+
     try:
-        http_session = chronicle_auth.initialize_http_session(CREDENTIALS_FILE_PATH)
+        http_session = chronicle_auth.initialize_http_session(CHRONICLE_CREDENTIALS_PATH)
     except Exception as e:
         print(f"Authentication failed: {e}", file=sys.stderr)
         raise Exception(f"Authentication failed: {e}")
@@ -168,6 +142,17 @@ def get_html_content():
             background-color: #444;
             align-self: flex-start;
             border-bottom-left-radius: 0;
+        }}
+        /* Markdown-specific styling for the AI's response */
+        .chat-message.ai h1,
+        .chat-message.ai h2,
+        .chat-message.ai h3,
+        .chat-message.ai h4,
+        .chat-message.ai h5,
+        .chat-message.ai h6,
+        .chat-message.ai strong,
+        .chat-message.ai code {{
+            color: #ec415e; /* Pinkish-red color */
         }}
         .chat-messages {{
             display: flex;
@@ -256,10 +241,6 @@ def get_html_content():
         <div class="panel flex flex-col h-full">
             <div class="flex justify-between items-center mb-6">
                 <h2 class="text-3xl font-bold text-indigo-400">Gemini Chat</h2>
-                <div class="flex space-x-2">
-                    <button id="showHistoryBtn" class="bg-gray-700 text-sm px-3 py-1 rounded-full hover:bg-gray-600 focus:outline-none">History</button>
-                    <button id="newChatBtn" class="bg-gray-700 text-sm px-3 py-1 rounded-full hover:bg-gray-600 focus:outline-none">New Chat</button>
-                </div>
             </div>
             <div id="chatMessages" class="chat-messages-container flex-grow space-y-4">
                 <div class="chat-message ai bg-gray-700 p-4 rounded-xl max-w-sm self-start">
@@ -280,19 +261,6 @@ def get_html_content():
         </div>
     </div>
     
-    <!-- Modal for Chat History -->
-    <div id="historyModal" class="fixed inset-0 bg-gray-900 bg-opacity-75 hidden flex items-center justify-center">
-        <div class="bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-md mx-4">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="text-xl font-bold text-white">Chat History</h3>
-                <button id="closeModalBtn" class="text-gray-400 hover:text-white">&times;</button>
-            </div>
-            <ul id="historyList" class="space-y-2">
-                <!-- History items will be populated here -->
-            </ul>
-        </div>
-    </div>
-
     <script>
         document.addEventListener('DOMContentLoaded', () => {{
             const searchForm = document.getElementById('searchForm');
@@ -301,11 +269,6 @@ def get_html_content():
             const sendChatBtn = document.getElementById('sendChatBtn');
             const chatMessages = document.getElementById('chatMessages');
             const loadingIndicator = document.getElementById('loadingIndicator');
-            const newChatBtn = document.getElementById('newChatBtn');
-            const showHistoryBtn = document.getElementById('showHistoryBtn');
-            const historyModal = document.getElementById('historyModal');
-            const closeModalBtn = document.getElementById('closeModalBtn');
-            const historyList = document.getElementById('historyList');
 
             const initialAiMessage = `Hello! I'm Gemini, your AI assistant. I can help you with your UDM search queries, explain the results, or answer general questions. What can I do for you today?`;
 
@@ -323,65 +286,7 @@ def get_html_content():
                 chatMessages.appendChild(messageDiv);
                 chatMessages.scrollTop = chatMessages.scrollHeight; // Auto-scroll to the latest message
             }};
-
-            // Function to load chat history
-            const loadChatHistory = async () => {{
-                const chatSessionId = sessionStorage.getItem('chatSessionId');
-                if (chatSessionId) {{
-                    try {{
-                        const response = await fetch('/chat_history?chat_session_id=' + chatSessionId);
-                        if (!response.ok) {{
-                            throw new Error('Could not load chat history');
-                        }}
-                        const data = await response.json();
-                        chatMessages.innerHTML = '';
-                        if (data.history.length > 0) {{
-                             data.history.forEach(msg => {{
-                                addMessage(msg.message, msg.sender);
-                            }});
-                        }} else {{
-                             addMessage(initialAiMessage, 'ai');
-                        }}
-                    }} catch (error) {{
-                        console.error('Error loading chat history:', error);
-                        addMessage('Could not load previous chat history. Starting a new chat.', 'ai');
-                        sessionStorage.removeItem('chatSessionId');
-                    }}
-                }} else {{
-                    addMessage(initialAiMessage, 'ai');
-                }}
-            }};
             
-            // Function to fetch and display chat sessions
-            const fetchChatSessions = async () => {{
-                try {{
-                    const response = await fetch('/chat_sessions');
-                    if (!response.ok) {{
-                        throw new Error('Could not fetch chat sessions');
-                    }}
-                    const sessions = await response.json();
-                    historyList.innerHTML = '';
-                    if (sessions.length > 0) {{
-                        sessions.forEach(session => {{
-                            const li = document.createElement('li');
-                            const date = new Date(session.timestamp).toLocaleString();
-                            li.innerHTML = `<button class="w-full text-left p-2 rounded-md hover:bg-gray-700" data-id="${{session.id}}">${{date}}</button>`;
-                            li.querySelector('button').addEventListener('click', () => {{
-                                sessionStorage.setItem('chatSessionId', session.id);
-                                loadChatHistory();
-                                historyModal.classList.add('hidden');
-                            }});
-                            historyList.appendChild(li);
-                        }});
-                    }} else {{
-                        historyList.innerHTML = `<li class="text-gray-400">No previous chats found.</li>`;
-                    }}
-                }} catch (error) {{
-                    console.error('Error fetching chat sessions:', error);
-                    historyList.innerHTML = `<li class="text-red-400">Error loading history.</li>`;
-                }}
-            }};
-
             // Event listener for the UDM Search form
             searchForm.addEventListener('submit', async (e) => {{
                 e.preventDefault();
@@ -424,8 +329,6 @@ def get_html_content():
                 chatInput.value = '';
                 loadingIndicator.classList.remove('hidden');
 
-                const chatSessionId = sessionStorage.getItem('chatSessionId');
-                
                 // Get the latest search results from the pre tag
                 const logs = jsonResults.textContent.trim();
 
@@ -435,7 +338,7 @@ def get_html_content():
                         headers: {{
                             'Content-Type': 'application/json',
                         }},
-                        body: JSON.stringify({{ prompt, logs, chat_session_id: chatSessionId }}),
+                        body: JSON.stringify({{ prompt, logs }}),
                     }});
 
                     if (!response.ok) {{
@@ -443,12 +346,6 @@ def get_html_content():
                     }}
 
                     const data = await response.json();
-
-                    // If a new chat session was created, store the ID
-                    if (data.chat_session_id) {{
-                        sessionStorage.setItem('chatSessionId', data.chat_session_id);
-                    }}
-
                     addMessage(data.response, 'ai');
                 }} catch (error) {{
                     console.error('Error fetching chat response:', error);
@@ -457,24 +354,6 @@ def get_html_content():
                     loadingIndicator.classList.add('hidden');
                 }}
             }});
-
-            // Event listener for "New Chat" button
-            newChatBtn.addEventListener('click', () => {{
-                sessionStorage.removeItem('chatSessionId');
-                chatMessages.innerHTML = '';
-                addMessage(initialAiMessage, 'ai');
-            }});
-            
-            // Event listeners for history modal
-            showHistoryBtn.addEventListener('click', () => {{
-                fetchChatSessions();
-                historyModal.classList.remove('hidden');
-            }});
-
-            closeModalBtn.addEventListener('click', () => {{
-                historyModal.classList.add('hidden');
-            }});
-
 
             // Enable sending message on Enter key press
             chatInput.addEventListener('keydown', (e) => {{
@@ -492,8 +371,6 @@ def get_html_content():
             const yesterdayISO = new Date(yesterday.getTime() - yesterday.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
             document.getElementById('start_time').value = yesterdayISO;
 
-            // Load chat history on page load
-            loadChatHistory();
         }});
     </script>
 </body>
@@ -526,7 +403,6 @@ def search():
         if limit < 1 or limit > 1000:
             return jsonify({"error": "Limit must be between 1 and 1000"}), 400
 
-        # Save the search query to the database
         new_search = Search(query=query, start_time=start_time_str, end_time=end_time_str, limit=limit)
         db.session.add(new_search)
         db.session.commit()
@@ -540,23 +416,6 @@ def search():
     except Exception as e:
         return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
-@app.route("/history", methods=["GET"])
-def history():
-    """Fetches and returns the search history from the database."""
-    try:
-        searches = Search.query.order_by(Search.timestamp.desc()).all()
-        search_history = [{
-            "id": s.id,
-            "query": s.query,
-            "start_time": s.start_time,
-            "end_time": s.end_time,
-            "limit": s.limit,
-            "timestamp": s.timestamp.isoformat()
-        } for s in searches]
-        return jsonify(search_history)
-    except Exception as e:
-        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
-
 @app.route("/chat", methods=["POST"])
 def chat():
     """Handles the Gemini chat request."""
@@ -564,37 +423,20 @@ def chat():
         data = request.json
         prompt = data.get("prompt")
         logs = data.get("logs")
-        chat_session_id = data.get("chat_session_id")
         
         if not prompt:
             return jsonify({"error": "Prompt is required"}), 400
 
-        if not chat_session_id:
-            chat_session_id = str(uuid.uuid4())
-            user_chat_msg = Chat(chat_session_id=chat_session_id, sender='user', message=prompt)
-            db.session.add(user_chat_msg)
-            db.session.commit()
-        else:
-            user_chat_msg = Chat(chat_session_id=chat_session_id, sender='user', message=prompt)
-            db.session.add(user_chat_msg)
-            db.session.commit()
-
-        history_from_db = Chat.query.filter_by(chat_session_id=chat_session_id).order_by(Chat.timestamp).all()
         chat_history = []
-        
         initial_log_prompt = f"Raw Logs for Analysis:\n\n{logs}\n\n"
         chat_history.append({"role": "user", "parts": [{"text": initial_log_prompt}]})
         chat_history.append({"role": "model", "parts": [{"text": "I have received the logs. How can I help you analyze them?"}]})
-
-
-        for message in history_from_db:
-            role = "user" if message.sender == "user" else "model"
-            chat_history.append({"role": role, "parts": [{"text": message.message}]})
+        chat_history.append({"role": "user", "parts": [{"text": prompt}]})
 
 
         # Define the AI persona
         system_instruction = {
-            "parts": [{ "text": "You are a world-class cybersecurity analyst. Your task is to analyze raw logs provided by the user and respond to their questions based on those logs and the ongoing conversation. Explain your findings in a clear, concise, and professional manner. You must reference specific keys and values from the logs in your analysis." }]
+            "parts": [{ "text": "You are a world-class cybersecurity analyst. Your task is to analyze raw logs provided by the user and respond to their questions based on those logs. Explain your findings in a clear, concise, and professional manner. You must reference specific keys and values from the logs in your analysis." }]
         }
         
         if not GEMINI_API_KEY:
@@ -616,52 +458,10 @@ def chat():
         
         generated_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'No response from AI.')
 
-        ai_chat_msg = Chat(chat_session_id=chat_session_id, sender='ai', message=generated_text)
-        db.session.add(ai_chat_msg)
-        db.session.commit()
-
-        return jsonify({"response": generated_text, "chat_session_id": chat_session_id})
+        return jsonify({"response": generated_text})
 
     except requests.exceptions.HTTPError as e:
         return jsonify({"error": f"HTTP Error: {e.response.text}"}), e.response.status_code
-    except Exception as e:
-        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
-
-@app.route("/chat_history", methods=["GET"])
-def get_chat_history():
-    """Fetches and returns the chat history for a given session ID."""
-    try:
-        chat_session_id = request.args.get("chat_session_id")
-        if not chat_session_id:
-            return jsonify({"error": "Missing chat_session_id"}), 400
-
-        history = Chat.query.filter_by(chat_session_id=chat_session_id).order_by(Chat.timestamp).all()
-        chat_history = [{
-            "sender": msg.sender,
-            "message": msg.message,
-            "timestamp": msg.timestamp.isoformat()
-        } for msg in history]
-
-        return jsonify({"history": chat_history})
-
-    except Exception as e:
-        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
-
-@app.route("/chat_sessions", methods=["GET"])
-def get_chat_sessions():
-    """Fetches a list of all chat sessions with their creation timestamp."""
-    try:
-        sessions = db.session.query(
-            Chat.chat_session_id.label('id'), 
-            db.func.min(Chat.timestamp).label('timestamp')
-        ).group_by(Chat.chat_session_id).order_by(db.func.min(Chat.timestamp).desc()).all()
-
-        chat_sessions = [{
-            "id": s.id,
-            "timestamp": s.timestamp.isoformat()
-        } for s in sessions]
-
-        return jsonify(chat_sessions)
     except Exception as e:
         return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
