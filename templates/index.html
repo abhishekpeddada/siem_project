@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UDM Search & Gemini Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background: radial-gradient(circle at top left, #0d0d0d, #0a0a0a 60%, #000);
+            color: #ddd;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .container-main {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            max-width: 1280px;
+            margin: auto;
+            flex-grow: 1;
+            padding: 1rem;
+        }
+        h1, h2, h3 {
+            font-family: 'Orbitron', sans-serif;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: white !important;
+        }
+        /* Neon glow headers */
+        .neon-title {
+            font-weight: 900;
+            font-size: 2rem;
+            color: #ff6600;
+            text-shadow: 0 0 8px #ff6600, 0 0 16px #ff3300;
+        }
+        .neon-subtitle {
+            color: #00cfff;
+            font-weight: 700;
+            text-shadow: 0 0 6px #00cfff, 0 0 12px #0088cc;
+        }
+        /* Panels with scrollbars */
+        .panel {
+            background: rgba(20, 20, 20, 0.9);
+            border: 1px solid rgba(255, 102, 0, 0.3);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.6), 0 0 10px rgba(255, 102, 0, 0.2);
+            display: flex;
+            flex-direction: column;
+            max-height: 85vh;
+            min-height: 0;
+            overflow: auto;
+            position: relative;
+        }
+        /* Buttons */
+        .btn-primary {
+            background: linear-gradient(90deg, #ff6600, #ff3300);
+            color: #fff;
+            font-weight: bold;
+            padding: 0.6rem 1.2rem;
+            border-radius: 0.5rem;
+            text-transform: uppercase;
+            transition: 0.2s;
+            box-shadow: 0 0 10px #ff6600;
+        }
+        .btn-primary:hover {
+            box-shadow: 0 0 20px #ff3300, 0 0 30px #ff6600;
+        }
+        .btn-secondary {
+            background: linear-gradient(90deg, #00cfff, #0088cc);
+            color: #fff;
+            font-weight: bold;
+            padding: 0.6rem 1.2rem;
+            border-radius: 0.5rem;
+            text-transform: uppercase;
+            transition: 0.2s;
+            box-shadow: 0 0 10px #00cfff;
+        }
+        .btn-secondary:hover {
+            box-shadow: 0 0 20px #00cfff, 0 0 30px #0088cc;
+        }
+        /* Chat messages */
+        .chat-message {
+            padding: 0.8rem 1rem;
+            border-radius: 0.75rem;
+            max-width: 70%;
+            font-size: 0.9rem;
+            line-height: 1.4;
+            word-break: break-word;
+        }
+        .chat-message.user {
+            background: rgba(255, 102, 0, 0.8);
+            color: #fff;
+            margin-left: auto;
+            box-shadow: 0 0 10px #ff6600;
+        }
+        .chat-message.ai {
+            background: rgba(0, 207, 255, 0.15);
+            border: 1px solid rgba(0, 207, 255, 0.4);
+            color: #fff;
+            margin-right: auto;
+            box-shadow: 0 0 10px rgba(0, 207, 255, 0.3);
+        }
+        /* Input fields */
+        .input-group input,
+        .input-group textarea,
+        .input-group select {
+            background: #0f0f0f;
+            border: 1px solid #333;
+            color: #ddd;
+            border-radius: 0.5rem;
+            padding: 0.5rem;
+            font-family: 'Inter', sans-serif;
+        }
+        .input-group label {
+            color: #aaa;
+            font-size: 0.85rem;
+        }
+        /* Content container adjustments */
+        .content-scroll-container {
+            flex-grow: 1;
+            min-height: 0;
+            min-width: 0;
+            padding-bottom: 1rem;
+            padding-right: 0.5rem;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        #jsonResults {
+            background: #0f0f0f;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            font-family: monospace;
+            white-space: pre;
+            min-width: 0;
+            min-height: 0;
+            overflow-x: auto;
+        }
+        .chat-messages-container {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            min-height: 0;
+            min-width: 0;
+            overflow-y: auto;
+        }
+        .input-area-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding-top: 0.5rem;
+            padding-bottom: 0.5rem;
+            border-top: 1px solid rgba(0, 207, 255, 0.2);
+            background: rgba(15, 15, 15, 0.95);
+            position: sticky;
+            bottom: 0;
+            z-index: 10;
+        }
+        #chatInput {
+            flex-grow: 1;
+            max-height: 100px;
+            resize: vertical;
+            overflow-y: auto;
+            background-color: #000000;
+            color: #ddd;
+            border: 1px solid #333;
+            border-radius: 0.5rem 0 0 0.5rem;
+            padding: 0.5rem 1rem;
+            height: auto;
+            min-height: 2.5rem;
+            font-family: 'Inter', sans-serif;
+            box-sizing: border-box;
+        }
+        #chatInput::placeholder {
+            color: #888;
+        }
+        #sendChatBtn {
+            border-radius: 0 0.5rem 0.5rem 0;
+            height: 2.5rem;
+            padding: 0 1.2rem;
+            flex-shrink: 0;
+        }
+        /* Thinking text */
+        #thinkingText {
+            color: #00cfff;
+            font-style: italic;
+            font-weight: 600;
+            font-family: 'Inter', sans-serif;
+            padding: 0.5rem;
+            white-space: nowrap;
+        }
+        /* Loader hidden as it is replaced */
+        #loadingIndicator {
+            display: none;
+        }
+    </style>
+</head>
+<body class="p-4">
+    <div class="container-main">
+        <div class="panel">
+            <h2 class="neon-title mb-6">UDM Search</h2>
+            <form id="searchForm" class="space-y-4">
+                <div class="input-group">
+                    <label for="query">UDM Query</label>
+                    <textarea id="query" name="query" rows="4" class="w-full" placeholder="e.g., principal.ip = '10.12.34.56'" required></textarea>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="input-group">
+                        <label for="start_time">Start Time</label>
+                        <input type="datetime-local" id="start_time" name="start_time" required />
+                    </div>
+                    <div class="input-group">
+                        <label for="end_time">End Time</label>
+                        <input type="datetime-local" id="end_time" name="end_time" required />
+                    </div>
+                </div>
+                <div class="input-group">
+                    <label for="limit">Limit</label>
+                    <input type="number" id="limit" name="limit" value="1000" min="1" max="1000" />
+                </div>
+                <button type="submit" class="btn-primary w-full">Search</button>
+            </form>
+            <div id="results" class="mt-6 flex-grow flex flex-col">
+                <h3 class="neon-subtitle mb-3">Results</h3>
+                <div class="content-scroll-container">
+                    <pre id="jsonResults"></pre>
+                </div>
+            </div>
+        </div>
+        <div class="panel">
+            <h2 class="neon-title mb-6">Gemini Chat</h2>
+            <div class="content-scroll-container">
+                <div id="chatMessages" class="chat-messages-container"></div>
+            </div>
+            <div id="thinkingText" style="display:none;">Analysing<span id="dots"></span></div>
+            <div class="input-area-wrapper">
+                <textarea id="chatInput" rows="1" placeholder="Type your message..."></textarea>
+                <button id="sendChatBtn" class="btn-secondary">Send</button>
+            </div>
+            <div id="loadingIndicator" class="mt-2 flex items-center justify-center hidden">
+                <div class="loader"></div>
+            </div>
+        </div>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const searchForm = document.getElementById('searchForm');
+            const jsonResults = document.getElementById('jsonResults');
+            const chatInput = document.getElementById('chatInput');
+            const sendChatBtn = document.getElementById('sendChatBtn');
+            const chatMessages = document.getElementById('chatMessages');
+            const thinkingText = document.getElementById('thinkingText');
+            const dotsSpan = document.getElementById('dots');
+            let dotsInterval;
+
+            const addMessage = (text, sender) => {
+                const messageDiv = document.createElement('div');
+                messageDiv.classList.add('chat-message', sender);
+                messageDiv.innerHTML = sender === 'ai' ? marked.parse(text) : text;
+                chatMessages.appendChild(messageDiv);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            };
+
+            searchForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                jsonResults.textContent = 'Searching...';
+                const formData = new FormData(searchForm);
+                try {
+                    const response = await fetch('/search', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(Object.fromEntries(formData)),
+                    });
+                    const data = await response.json();
+                    jsonResults.textContent = JSON.stringify(data, null, 2);
+                } catch (error) {
+                    jsonResults.textContent = `Error: ${error.message}`;
+                }
+            });
+
+            sendChatBtn.addEventListener('click', async () => {
+                const prompt = chatInput.value.trim();
+                if (!prompt) return;
+                addMessage(prompt, 'user');
+                chatInput.value = '';
+
+                thinkingText.style.display = 'block';
+                let dots = '';
+                dotsInterval = setInterval(() => {
+                    dots = dots.length < 3 ? dots + '.' : '';
+                    dotsSpan.textContent = dots;
+                }, 500);
+
+                const logs = jsonResults.textContent.trim();
+                try {
+                    const response = await fetch('/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ prompt, logs }),
+                    });
+                    const data = await response.json();
+                    addMessage(data.response, 'ai');
+                } catch {
+                    addMessage('Sorry, AI is unavailable right now.', 'ai');
+                } finally {
+                    thinkingText.style.display = 'none';
+                    clearInterval(dotsInterval);
+                    dotsSpan.textContent = '';
+                }
+            });
+
+            chatInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendChatBtn.click();
+                }
+            });
+
+            const now = new Date();
+            const nowISO = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+            document.getElementById('end_time').value = nowISO;
+            const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            const yesterdayISO = new Date(yesterday.getTime() - yesterday.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+            document.getElementById('start_time').value = yesterdayISO;
+        });
+    </script>
+</body>
+</html>
