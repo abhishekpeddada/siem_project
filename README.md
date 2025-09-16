@@ -24,7 +24,7 @@ Getting Started
 
     Clone the repository:
 
-    git clone [https://github.com/abhishekpeddada/siem_project.git](https://github.com/abhishekpeddada/siem_project.git)
+    git clone https://github.com/abhishekpeddada/siem_project.git -b udm_search
     cd siem_project
 
     Set up a Python virtual environment:
