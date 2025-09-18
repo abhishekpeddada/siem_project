@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Detections for Rule</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        body { 
+            margin: 20px; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5;
+        }
+        .log-display {
+            background-color: #e9ecef;
+            border: 1px solid #ced4da;
+            padding: 15px;
+            margin-top: 10px;
+            white-space: pre-wrap;
+            font-family: 'Consolas', 'Courier New', monospace;
+            max-height: 250px;
+            overflow-y: auto;
+            border-radius: 8px;
+        }
+        .chat-box {
+            background-color: #ffffff;
+            border: 1px solid #e0e0e0;
+            padding: 15px;
+            min-height: 350px;
+            overflow-y: auto;
+            margin-bottom: 15px;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px; /* Space between chat bubbles */
+        }
+        .chat-bubble {
+            padding: 12px 16px;
+            border-radius: 20px;
+            max-width: 85%;
+            word-wrap: break-word;
+            line-height: 1.5;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+        .user-message {
+            align-self: flex-end; /* Align to the right */
+            background-color: #007bff;
+            color: #ffffff;
+            border-bottom-right-radius: 4px; /* Tweak the corner to look more natural */
+        }
+        .ai-response {
+            align-self: flex-start; /* Align to the left */
+            background-color: #e9ecef;
+            color: #333;
+            border-bottom-left-radius: 4px; /* Tweak the corner to look more natural */
+        }
+        .ai-loading {
+            align-self: flex-start;
+            color: #6c757d;
+            font-style: italic;
+            padding: 12px 16px;
+            border-radius: 20px;
+            background-color: #f1f1f1;
+            box-shadow: none;
+        }
+        .markdown-content h1, .markdown-content h2, .markdown-content h3 {
+            margin-top: 1em;
+            margin-bottom: 0.5em;
+        }
+        .markdown-content p {
+            margin: 0.5em 0;
+        }
+        .markdown-content strong {
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mb-4">Detections for Rule: {{ version_id }}</h1>
+        <a href="/" class="btn btn-secondary mb-4">← Back to Rules</a>
+
+        <form method="GET" action="/detections/{{ version_id }}" class="mb-4">
+            <div class="row g-3 align-items-end">
+                <div class="col-md-4">
+                    <label for="start_time" class="form-label">Start Time (UTC)</label>
+                    <input type="datetime-local" class="form-control" id="start_time" name="start_time" value="{{ start_time }}">
+                </div>
+                <div class="col-md-4">
+                    <label for="end_time" class="form-label">End Time (UTC)</label>
+                    <input type="datetime-local" class="form-control" id="end_time" name="end_time" value="{{ end_time }}">
+                </div>
+                <div class="col-md-4">
+                    <button type="submit" class="btn btn-primary">Filter</button>
+                </div>
+            </div>
+        </form>
+
+        <div class="row">
+            <div class="col-md-8">
+                <h3>Detections</h3>
+                {% if detections %}
+                <div class="accordion" id="detectionsAccordion">
+                    {% for detection in detections %}
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="heading{{ loop.index }}">
+                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapse{{ loop.index }}" aria-expanded="false" aria-controls="collapse{{ loop.index }}">
+                                Detection ID: {{ detection.get('id', 'N/A') }}
+                            </button>
+                        </h2>
+                        <div id="collapse{{ loop.index }}" class="accordion-collapse collapse" aria-labelledby="heading{{ loop.index }}" data-bs-parent="#detectionsAccordion">
+                            <div class="accordion-body">
+                                <p><strong>Detection Time:</strong> {{ detection.get('detectionTime', 'N/A') }}</p>
+                                <p><strong>Rule Name:</strong> {{ detection.get('detection', [{}])[0].get('ruleName', 'N/A') }}</p>
+                                <hr>
+                                <h5>Raw Logs</h5>
+                                <div class="log-display">
+                                    {{ detection.get('collectionElements', 'No logs found') | tojson(indent=2) }}
+                                </div>
+                                <hr>
+                                <h5>Gemini AI Analysis</h5>
+                                <div class="chat-box" id="chat-box-{{ loop.index }}"></div>
+                                <div class="input-group mt-3">
+                                    <input type="text" class="form-control" placeholder="Ask Gemini about these logs..." id="chat-input-{{ loop.index }}">
+                                    <button class="btn btn-primary" type="button" onclick="sendMessage({{ loop.index }})">Send</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p>No detections found for the selected time frame.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked@4.0.10/lib/marked.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function sendMessage(detectionIndex) {
+            const inputElement = document.getElementById(`chat-input-${detectionIndex}`);
+            const chatBoxElement = document.getElementById(`chat-box-${detectionIndex}`);
+            const userMessage = inputElement.value;
+            let loadingInterval;
+
+            if (!userMessage) return;
+
+            // Display user message in chat box
+            const userBubble = document.createElement('div');
+            userBubble.className = 'chat-bubble user-message';
+            userBubble.textContent = `You: ${userMessage}`;
+            chatBoxElement.appendChild(userBubble);
+            inputElement.value = "";
+            chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
+
+            // Start the loading animation
+            const loadingBubble = document.createElement('div');
+            loadingBubble.className = 'chat-bubble ai-loading';
+            loadingBubble.textContent = 'Analyzing logs...';
+            chatBoxElement.appendChild(loadingBubble);
+            chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
+
+            let dotCount = 0;
+            loadingInterval = setInterval(() => {
+                dotCount = (dotCount + 1) % 4;
+                loadingBubble.textContent = 'Analyzing logs' + '.'.repeat(dotCount);
+            }, 500); // Add a dot every half second
+
+            // Get the raw logs for this detection
+            const logsData = {{ detections | tojson }}[detectionIndex - 1].collectionElements;
+            const logsString = JSON.stringify(logsData, null, 2);
+
+            // Send to Flask API
+            fetch("/api/chat", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    logs: logsString,
+                    message: userMessage
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Clear the loading animation
+                clearInterval(loadingInterval);
+                chatBoxElement.removeChild(loadingBubble);
+
+                const aiBubble = document.createElement('div');
+                aiBubble.className = 'chat-bubble ai-response';
+                
+                if (data.response) {
+                    const htmlContent = marked.parse(data.response);
+                    aiBubble.innerHTML = htmlContent;
+                } else {
+                    aiBubble.innerHTML = `<span style="color: red;">Error: ${data.error}</span>`;
+                }
+                
+                chatBoxElement.appendChild(aiBubble);
+                chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
+            })
+            .catch(error => {
+                // Clear the loading animation on error
+                clearInterval(loadingInterval);
+                chatBoxElement.removeChild(loadingBubble);
+                
+                const errorBubble = document.createElement('div');
+                errorBubble.className = 'chat-bubble ai-response';
+                errorBubble.innerHTML = `<span style="color: red;">Network Error: ${error}</span>`;
+                chatBoxElement.appendChild(errorBubble);
+                chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
+            });
+        }
+    </script>
+</body>
+</html>
