@@ -31,7 +31,7 @@
             border-radius: 12px;
             display: flex;
             flex-direction: column;
-            gap: 10px; /* Space between chat bubbles */
+            gap: 10px;
         }
         .chat-bubble {
             padding: 12px 16px;
@@ -42,16 +42,16 @@
             box-shadow: 0 1px 2px rgba(0,0,0,0.1);
         }
         .user-message {
-            align-self: flex-end; /* Align to the right */
+            align-self: flex-end;
             background-color: #007bff;
             color: #ffffff;
-            border-bottom-right-radius: 4px; /* Tweak the corner to look more natural */
+            border-bottom-right-radius: 4px;
         }
         .ai-response {
-            align-self: flex-start; /* Align to the left */
+            align-self: flex-start;
             background-color: #e9ecef;
             color: #333;
-            border-bottom-left-radius: 4px; /* Tweak the corner to look more natural */
+            border-bottom-left-radius: 4px;
         }
         .ai-loading {
             align-self: flex-start;
@@ -79,7 +79,7 @@
         <h1 class="mb-4">Detections for Rule: {{ version_id }}</h1>
         <a href="/" class="btn btn-secondary mb-4">← Back to Rules</a>
 
-        <form method="GET" action="/detections/{{ version_id }}" class="mb-4">
+        <form id="detectionsForm" method="GET" action="/detections/{{ version_id }}" class="mb-4">
             <div class="row g-3 align-items-end">
                 <div class="col-md-4">
                     <label for="start_time" class="form-label">Start Time (UTC)</label>
@@ -123,6 +123,29 @@
                                     <input type="text" class="form-control" placeholder="Ask Gemini about these logs..." id="chat-input-{{ loop.index }}">
                                     <button class="btn btn-primary" type="button" onclick="sendMessage({{ loop.index }})">Send</button>
                                 </div>
+                                
+                                <hr>
+                                <h5>Historical UDM Search</h5>
+                                <div class="card p-3">
+                                    <div class="mb-3">
+                                        <label for="udm_query_input_{{ loop.index }}" class="form-label">UDM Query</label>
+                                        <textarea class="form-control" id="udm_query_input_{{ loop.index }}" rows="2" placeholder="e.g., target.user.hostname = 'some-host' or ip = '1.2.3.4'"></textarea>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-md-6 mb-3">
+                                            <label for="udm_start_time_{{ loop.index }}" class="form-label">Start Time</label>
+                                            <input type="datetime-local" class="form-control" id="udm_start_time_{{ loop.index }}">
+                                        </div>
+                                        <div class="col-md-6 mb-3">
+                                            <label for="udm_end_time_{{ loop.index }}" class="form-label">End Time</label>
+                                            <input type="datetime-local" class="form-control" id="udm_end_time_{{ loop.index }}">
+                                        </div>
+                                    </div>
+                                    <div class="text-end">
+                                        <button class="btn btn-info" type="button" onclick="searchUdmLogs({{ loop.index }})">Search UDM Logs & Analyze</button>
+                                    </div>
+                                </div>
+                                
                             </div>
                         </div>
                     </div>
@@ -138,23 +161,138 @@
     <script src="https://cdn.jsdelivr.net/npm/marked@4.0.10/lib/marked.umd.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        function convertToIsoFormat(dtStr) {
+            if (!dtStr) return null;
+            try {
+                const localDate = new Date(dtStr);
+
+                if (isNaN(localDate.getTime())) {
+                    console.error("Invalid date string:", dtStr);
+                    return null;
+                }
+
+                return localDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
+            } catch (e) {
+                console.error("Date conversion failed:", e);
+                return null;
+            }
+        }
+
+        // Handles the form submission for detections
+        document.getElementById('detectionsForm').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const form = event.target;
+            const start_time_local = document.getElementById('start_time').value;
+            const end_time_local = document.getElementById('end_time').value;
+
+            const start_time_iso = convertToIsoFormat(start_time_local);
+            const end_time_iso = convertToIsoFormat(end_time_local);
+            
+            if (!start_time_iso || !end_time_iso) {
+                alert("Invalid date or time range. Please check your input.");
+                return;
+            }
+            
+            const url = new URL(form.action);
+            url.searchParams.set('start_time', start_time_local);
+            url.searchParams.set('end_time', end_time_local);
+            
+            window.location.href = url.href;
+        });
+
         function sendMessage(detectionIndex) {
             const inputElement = document.getElementById(`chat-input-${detectionIndex}`);
             const chatBoxElement = document.getElementById(`chat-box-${detectionIndex}`);
             const userMessage = inputElement.value;
-            let loadingInterval;
-
+            
             if (!userMessage) return;
 
-            // Display user message in chat box
-            const userBubble = document.createElement('div');
-            userBubble.className = 'chat-bubble user-message';
-            userBubble.textContent = `You: ${userMessage}`;
-            chatBoxElement.appendChild(userBubble);
-            inputElement.value = "";
+            const logsData = {{ detections | tojson }}[detectionIndex - 1].collectionElements;
+            const logsString = JSON.stringify(logsData, null, 2);
+
+            sendToChatApi(userMessage, logsString, chatBoxElement, inputElement);
+        }
+
+        function searchUdmLogs(detectionIndex) {
+            const udmQuery = document.getElementById(`udm_query_input_${detectionIndex}`).value;
+            const udmStartTime = document.getElementById(`udm_start_time_${detectionIndex}`).value;
+            const udmEndTime = document.getElementById(`udm_end_time_${detectionIndex}`).value;
+            const chatBoxElement = document.getElementById(`chat-box-${detectionIndex}`);
+            
+            if (!udmQuery || !udmStartTime || !udmEndTime) {
+                alert("Please fill in all UDM search fields.");
+                return;
+            }
+            
+            const udmStartTimeIso = convertToIsoFormat(udmStartTime);
+            const udmEndTimeIso = convertToIsoFormat(udmEndTime);
+
+            if (!udmStartTimeIso || !udmEndTimeIso) {
+                alert("Invalid date format. Please check the start and end times.");
+                return;
+            }
+
+            const loadingBubble = document.createElement('div');
+            loadingBubble.className = 'chat-bubble ai-loading';
+            loadingBubble.textContent = 'Searching UDM logs...';
+            chatBoxElement.appendChild(loadingBubble);
             chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
 
-            // Start the loading animation
+            let dotCount = 0;
+            const loadingInterval = setInterval(() => {
+                dotCount = (dotCount + 1) % 4;
+                loadingBubble.textContent = 'Searching UDM logs' + '.'.repeat(dotCount);
+            }, 500);
+
+            fetch("/api/udm_search", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    query: udmQuery,
+                    start_time: udmStartTimeIso,
+                    end_time: udmEndTimeIso,
+                    limit: 100
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                clearInterval(loadingInterval);
+                chatBoxElement.removeChild(loadingBubble);
+
+                if (data.error) {
+                    const errorBubble = document.createElement('div');
+                    errorBubble.className = 'chat-bubble ai-response';
+                    errorBubble.innerHTML = `<span style="color: red;">UDM Search failed: ${data.error}</span>`;
+                    chatBoxElement.appendChild(errorBubble);
+                } else {
+                    const udmLogsString = JSON.stringify(data.logs, null, 2);
+                    const prompt = "Please analyze the following UDM logs and provide a summary of the activity found.";
+                    
+                    sendToChatApi(prompt, udmLogsString, chatBoxElement, null);
+                }
+            })
+            .catch(error => {
+                clearInterval(loadingInterval);
+                chatBoxElement.removeChild(loadingBubble);
+                
+                const errorBubble = document.createElement('div');
+                errorBubble.className = 'chat-bubble ai-response';
+                errorBubble.innerHTML = `<span style="color: red;">Network Error during UDM search: ${error}</span>`;
+                chatBoxElement.appendChild(errorBubble);
+            });
+        }
+
+        function sendToChatApi(userPrompt, logsString, chatBoxElement, inputElement) {
+            let loadingInterval;
+            
+            if (inputElement) {
+                const userBubble = document.createElement('div');
+                userBubble.className = 'chat-bubble user-message';
+                userBubble.textContent = `You: ${userPrompt}`;
+                chatBoxElement.appendChild(userBubble);
+                inputElement.value = "";
+            }
+
             const loadingBubble = document.createElement('div');
             loadingBubble.className = 'chat-bubble ai-loading';
             loadingBubble.textContent = 'Analyzing logs...';
@@ -165,13 +303,8 @@
             loadingInterval = setInterval(() => {
                 dotCount = (dotCount + 1) % 4;
                 loadingBubble.textContent = 'Analyzing logs' + '.'.repeat(dotCount);
-            }, 500); // Add a dot every half second
+            }, 500);
 
-            // Get the raw logs for this detection
-            const logsData = {{ detections | tojson }}[detectionIndex - 1].collectionElements;
-            const logsString = JSON.stringify(logsData, null, 2);
-
-            // Send to Flask API
             fetch("/api/chat", {
                 method: "POST",
                 headers: {
@@ -179,12 +312,11 @@
                 },
                 body: JSON.stringify({
                     logs: logsString,
-                    message: userMessage
+                    prompt: userPrompt
                 }),
             })
             .then(response => response.json())
             .then(data => {
-                // Clear the loading animation
                 clearInterval(loadingInterval);
                 chatBoxElement.removeChild(loadingBubble);
 
@@ -202,14 +334,13 @@
                 chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
             })
             .catch(error => {
-                // Clear the loading animation on error
                 clearInterval(loadingInterval);
                 chatBoxElement.removeChild(loadingBubble);
                 
                 const errorBubble = document.createElement('div');
                 errorBubble.className = 'chat-bubble ai-response';
                 errorBubble.innerHTML = `<span style="color: red;">Network Error: ${error}</span>`;
-                chatBoxElement.appendChild(errorBubble);
+                chatBoxBoxElement.appendChild(errorBubble);
                 chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
             });
         }
