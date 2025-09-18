@@ -4,9 +4,12 @@ import sys
 import requests
 import datetime
 from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask_sqlalchemy import SQLAlchemy
 import google.generativeai as genai
 from dotenv import load_dotenv
 from typing import Any, Mapping, Optional, Sequence, Tuple
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from list_rules import get_all_rules
 from list_detections import get_detections_for_rule
@@ -17,22 +20,38 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# --- Database Configuration ---
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app_data.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
 # Configure Gemini AI
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Define variables for Chronicle API access
 CHRONICLE_CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "nfr4-backstory.json")
 CHRONICLE_REGION = os.getenv("CHRONICLE_REGION", "us")
 UDM_API_BASE_URL = "https://backstory.googleapis.com"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+class ChatMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    detection_id = db.Column(db.String(255), nullable=False)
+    sender = db.Column(db.String(10), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'detection_id': self.detection_id,
+            'sender': self.sender,
+            'message': self.message,
+            'timestamp': self.timestamp.isoformat()
+        }
 
 def format_to_chronicle_time(dt_str: str) -> Optional[str]:
-    """
-    Converts a datetime-local string (YYYY-MM-DDTHH:MM) to a
-    UTC ISO 8601 string (YYYY-MM-DDThh:mm:ssZ) for Chronicle API.
-    """
+    """Converts a datetime-local string to a UTC ISO 8601 string."""
     if not dt_str:
         return None
     try:
@@ -42,10 +61,8 @@ def format_to_chronicle_time(dt_str: str) -> Optional[str]:
     except ValueError:
         return None
 
-
 def real_udm_search(query: str, start_time: datetime.datetime, end_time: datetime.datetime, limit: int) -> Mapping[str, Any]:
-    """Performs a UDM search against the real API.
-    """
+    """Performs a UDM search against the real API."""
     if not os.path.exists(CHRONICLE_CREDENTIALS_FILE):
         raise FileNotFoundError(f"Chronicle credentials file not found at path: {CHRONICLE_CREDENTIALS_FILE}.")
     
@@ -73,25 +90,18 @@ def real_udm_search(query: str, start_time: datetime.datetime, end_time: datetim
     response.raise_for_status()
     return response.json()
 
-
-# Routes
 @app.route("/")
 def dashboard():
-    """
-    Renders the main dashboard page, listing all rules.
-    """
+    """Renders the main dashboard page, listing all rules."""
     try:
         rules = get_all_rules(CHRONICLE_CREDENTIALS_FILE, CHRONICLE_REGION)
         return render_template("dashboard.html", rules=rules)
     except Exception as e:
         return f"An error occurred: {e}", 500
 
-
 @app.route("/detections/<version_id>")
 def detection_details(version_id):
-    """
-    Renders the detections page for a specific rule version.
-    """
+    """Renders the detections page for a specific rule version."""
     try:
         start_time_str = request.args.get("start_time")
         end_time_str = request.args.get("end_time")
@@ -149,7 +159,6 @@ def api_udm_search():
 
         results = real_udm_search(query, start_time_dt, end_time_dt, limit)
         return jsonify({"logs": results})
-
     except Exception as e:
         return jsonify({"error": f"UDM Search failed: {str(e)}"}), 500
 
@@ -160,23 +169,32 @@ def chat():
         data = request.json
         prompt = data.get("prompt")
         logs = data.get("logs")
+        detection_id = data.get("detection_id")
         
-        if not prompt or not logs:
-            return jsonify({"error": "Prompt and logs are required"}), 400
+        if not all([prompt, logs, detection_id]):
+            return jsonify({"error": "Prompt, logs, and detection_id are required"}), 400
 
-        final_prompt = (
-            f"You are a world-class cybersecurity analyst. Your task is to analyze the following raw logs "
-            f"and respond to the user's question based on them. Explain your findings in a clear, concise, "
-            f"and professional manner. You must reference specific keys and values from the logs in your analysis.\n\n"
-            f"Raw Logs:\n{logs}\n\n"
-            f"User's Question: {prompt}"
-        )
+        history = ChatMessage.query.filter_by(detection_id=detection_id).order_by(ChatMessage.timestamp).all()
         
+        chat_history = []
+        chat_history.append({"role": "user", "parts": [{"text": f"Raw Logs for Analysis:\n\n{logs}\n\n"}]})
+        chat_history.append({"role": "model", "parts": [{"text": "I have received the logs. How can I help you analyze them?"}]})
+        
+        for msg in history:
+            chat_history.append({"role": "user" if msg.sender == 'user' else 'model', "parts": [{"text": msg.message}]})
+
+        chat_history.append({"role": "user", "parts": [{"text": prompt}]})
+
         if not GEMINI_API_KEY:
-            return jsonify({"error": "Gemini API key not found. Please set the GEMINI_API_KEY environment variable."}), 500
+            return jsonify({"error": "Gemini API key not found."}), 500
+        
+        system_instruction_payload = {
+            "parts": [{ "text": "You are a world-class cybersecurity analyst. Your task is to analyze raw logs provided by the user and respond to their questions based on those logs. Explain your findings in a clear, concise, and professional manner. You must reference specific keys and values from the logs in your analysis." }]
+        }
 
         payload = {
-            "contents": [{"role": "user", "parts": [{"text": final_prompt}]}]
+            "contents": chat_history,
+            "system_instruction": system_instruction_payload
         }
 
         headers = {
@@ -189,6 +207,12 @@ def chat():
         result = response.json()
         generated_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'No response from AI.')
 
+        user_msg = ChatMessage(detection_id=detection_id, sender='user', message=prompt)
+        ai_msg = ChatMessage(detection_id=detection_id, sender='ai', message=generated_text)
+        db.session.add(user_msg)
+        db.session.add(ai_msg)
+        db.session.commit()
+
         return jsonify({"response": generated_text})
 
     except requests.exceptions.HTTPError as e:
@@ -196,5 +220,14 @@ def chat():
     except Exception as e:
         return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
+@app.route("/api/chat/history/<detection_id>", methods=["GET"])
+def get_chat_history(detection_id):
+    """Retrieves chat history for a specific detection ID."""
+    history = ChatMessage.query.filter_by(detection_id=detection_id).order_by(ChatMessage.timestamp).all()
+    history_list = [msg.to_dict() for msg in history]
+    return jsonify(history_list)
+
 if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)
