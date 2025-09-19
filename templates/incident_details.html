@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Incident Details: {{ incident.title }}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        body { 
+            margin: 20px; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5;
+        }
+        .log-display {
+            background-color: #e9ecef;
+            border: 1px solid #ced4da;
+            padding: 15px;
+            margin-top: 10px;
+            white-space: pre-wrap;
+            font-family: 'Consolas', 'Courier New', monospace;
+            max-height: 250px;
+            overflow-y: auto;
+            border-radius: 8px;
+        }
+        .chat-box {
+            background-color: #ffffff;
+            border: 1px solid #e0e0e0;
+            padding: 15px;
+            max-height: 450px; 
+            overflow-y: auto;
+            margin-bottom: 15px;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .chat-bubble {
+            padding: 12px 16px;
+            border-radius: 20px;
+            max-width: 85%;
+            word-wrap: break-word;
+            line-height: 1.5;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+        .user-message {
+            align-self: flex-end;
+            background-color: #007bff;
+            color: #ffffff;
+            border-bottom-right-radius: 4px;
+        }
+        .ai-response {
+            align-self: flex-start;
+            background-color: #e9ecef;
+            color: #333;
+            border-bottom-left-radius: 4px;
+        }
+        .ai-loading {
+            align-self: flex-start;
+            color: #6c757d;
+            font-style: italic;
+            padding: 12px 16px;
+            border-radius: 20px;
+            background-color: #f1f1f1;
+            box-shadow: none;
+        }
+        .markdown-content h1, .markdown-content h2, .markdown-content h3 {
+            margin-top: 1em;
+            margin-bottom: 0.5em;
+        }
+        .markdown-content p {
+            margin: 0.5em 0;
+        }
+        .markdown-content strong {
+            font-weight: 600;
+        }
+        .ai-response .markdown-content {
+            overflow-x: auto;
+        }
+        
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">Chronicle SOC</a>
+            <div class="collapse navbar-collapse">
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">Dashboard</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/udm_search">UDM Search</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+    <div class="container">
+        <h1 class="mb-4">Incident Details: {{ incident.title }}</h1>
+        <div class="row">
+            <div class="col-md-8">
+                <h3>Detections in this Incident</h3>
+                {% if detections %}
+                <div class="accordion" id="detectionsAccordion">
+                    {% for detection in detections %}
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="heading{{ loop.index }}">
+                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapse{{ loop.index }}" aria-expanded="false" aria-controls="collapse{{ loop.index }}">
+                                Detection ID: {{ detection.get('id', 'N/A') }}
+                            </button>
+                        </h2>
+                        <div id="collapse{{ loop.index }}" class="accordion-collapse collapse" aria-labelledby="heading{{ loop.index }}" data-bs-parent="#detectionsAccordion">
+                            <div class="accordion-body">
+                                <p><strong>Detection Time:</strong> {{ detection.get('detectionTime', 'N/A') }}</p>
+                                <p><strong>Rule Name:</strong> {{ detection.get('detection', [{}])[0].get('ruleName', 'N/A') }}</p>
+                                <hr>
+                                <h5>Raw Logs</h5>
+                                <div class="log-display">
+                                    {{ detection.get('collectionElements', 'No logs found') | tojson(indent=2) }}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p>No detections found for this incident.</p>
+                {% endif %}
+            </div>
+            <div class="col-md-4">
+                <h3>Gemini AI Analysis</h3>
+                <div class="chat-box" id="chat-box-{{ incident.id }}"></div>
+                <div class="input-group mt-3">
+                    <input type="text" class="form-control" placeholder="Ask Gemini about this incident..." id="chat-input-{{ incident.id }}">
+                    <button class="btn btn-primary" type="button" onclick="sendMessage('{{ incident.id }}')">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked@4.0.10/lib/marked.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            loadChatHistory('{{ incident.id }}');
+        });
+
+        async function loadChatHistory(incidentId) {
+            const chatBoxElement = document.getElementById(`chat-box-${incidentId}`);
+            if (chatBoxElement.dataset.loaded) return;
+
+            chatBoxElement.innerHTML = `<div class="ai-loading chat-bubble">Loading chat history...</div>`;
+
+            try {
+                const response = await fetch(`/api/chat/history/${incidentId}`);
+                if (!response.ok) throw new Error('Failed to fetch chat history');
+                const history = await response.json();
+                
+                chatBoxElement.innerHTML = '';
+                
+                history.forEach(msg => {
+                    const msgBubble = document.createElement('div');
+                    msgBubble.className = `chat-bubble ${msg.sender}-message`;
+                    if (msg.sender === 'ai') {
+                        const contentDiv = document.createElement('div');
+                        contentDiv.className = 'markdown-content';
+                        contentDiv.innerHTML = marked.parse(msg.message);
+                        msgBubble.appendChild(contentDiv);
+                    } else {
+                        msgBubble.textContent = `You: ${msg.message}`;
+                    }
+                    chatBoxElement.appendChild(msgBubble);
+                });
+                chatBoxElement.dataset.loaded = 'true';
+                chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
+            } catch (error) {
+                chatBoxElement.innerHTML = `<div class="ai-response chat-bubble" style="color: red;">Error loading chat history: ${error.message}</div>`;
+            }
+        }
+
+        function sendMessage(incidentId) {
+            const inputElement = document.getElementById(`chat-input-${incidentId}`);
+            const chatBoxElement = document.getElementById(`chat-box-${incidentId}`);
+            const userPrompt = inputElement.value;
+            
+            if (!userPrompt) return;
+
+            sendToChatApi(userPrompt, chatBoxElement, inputElement, incidentId);
+        }
+
+        function sendToChatApi(userPrompt, chatBoxElement, inputElement, incidentId) {
+            let loadingInterval;
+            
+            if (inputElement) {
+                const userBubble = document.createElement('div');
+                userBubble.className = 'chat-bubble user-message';
+                userBubble.textContent = `You: ${userPrompt}`;
+                chatBoxElement.appendChild(userBubble);
+                inputElement.value = "";
+            }
+
+            const loadingBubble = document.createElement('div');
+            loadingBubble.className = 'chat-bubble ai-loading';
+            loadingBubble.textContent = 'Analyzing incident logs...';
+            chatBoxElement.appendChild(loadingBubble);
+            chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
+
+            let dotCount = 0;
+            loadingInterval = setInterval(() => {
+                dotCount = (dotCount + 1) % 4;
+                loadingBubble.textContent = 'Analyzing incident logs' + '.'.repeat(dotCount);
+            }, 500);
+
+            fetch("/api/chat", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    prompt: userPrompt,
+                    incident_id: incidentId
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                clearInterval(loadingInterval);
+                chatBoxElement.removeChild(loadingBubble);
+
+                const aiBubble = document.createElement('div');
+                aiBubble.className = 'chat-bubble ai-response';
+                
+                if (data.response) {
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = 'markdown-content';
+                    contentDiv.innerHTML = marked.parse(data.response);
+                    aiBubble.appendChild(contentDiv);
+                } else {
+                    aiBubble.innerHTML = `<span style="color: red;">Error: ${data.error}</span>`;
+                }
+                
+                chatBoxElement.appendChild(aiBubble);
+                chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
+            })
+            .catch(error => {
+                clearInterval(loadingInterval);
+                chatBoxElement.removeChild(loadingBubble);
+                
+                const errorBubble = document.createElement('div');
+                errorBubble.className = 'chat-bubble ai-response';
+                errorBubble.innerHTML = `<span style="color: red;">Network Error: ${error}</span>`;
+                chatBoxElement.appendChild(errorBubble);
+                chatBoxElement.scrollTop = chatBoxElement.scrollHeight;
+            });
+        }
+    </script>
+</body>
+</html>

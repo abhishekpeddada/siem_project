@@ -54,6 +54,22 @@ def get_all_rules(credentials_file: str, region: str, archive_state: str = "") -
             break
     return all_rules
 
+def get_all_rules_by_ids(credentials_file: str, region: str, rule_ids: list) -> list:
+    """Fetches a specific list of rules by their IDs."""
+    session = chronicle_auth.initialize_http_session(credentials_file)
+    global CHRONICLE_API_BASE_URL
+    CHRONICLE_API_BASE_URL = regions.url(CHRONICLE_API_BASE_URL, region)
+    
+    all_rules = []
+    for rule_id in rule_ids:
+        url = f"{CHRONICLE_API_BASE_URL}/v2/detect/rules/{rule_id}"
+        try:
+            response = session.request("GET", url)
+            response.raise_for_status()
+            all_rules.append(response.json())
+        except requests.exceptions.HTTPError as e:
+            print(f"Error fetching rule {rule_id}: {e.response.text}", file=sys.stderr)
+    return all_rules
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -77,10 +93,20 @@ if __name__ == "__main__":
         type=str,
         required=False,
         help="archive state (i.e. 'ACTIVE', 'ARCHIVED', 'ALL')")
+    parser.add_argument(
+        "-i",
+        "--rule_ids",
+        nargs='+',
+        type=str,
+        required=False,
+        help="list of rule IDs to fetch")
 
     args = parser.parse_args()
     
-    if args.page_size or args.page_token or args.archive_state:
+    if args.rule_ids:
+        rules = get_all_rules_by_ids(args.credentials_file, args.region, args.rule_ids)
+        print(json.dumps(rules, indent=2))
+    elif args.page_size or args.page_token or args.archive_state:
         session = chronicle_auth.initialize_http_session(args.credentials_file)
         CHRONICLE_API_BASE_URL = regions.url(CHRONICLE_API_BASE_URL, args.region)
         rules, next_page_token = list_rules(session, args.page_size, args.page_token, args.archive_state)
