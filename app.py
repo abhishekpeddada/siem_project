@@ -10,8 +10,9 @@ from dotenv import load_dotenv
 from typing import Any, Mapping, Optional, Sequence, Tuple
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+import re
 
-from list_rules import get_all_rules, get_all_rules_by_ids
+from list_rules import get_all_rules_by_ids
 from list_detections import get_detections_for_rule
 from common import chronicle_auth
 from common import regions
@@ -33,9 +34,9 @@ CHRONICLE_REGION = os.getenv("CHRONICLE_REGION", "us")
 UDM_API_BASE_URL = "https://backstory.googleapis.com"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ABUSEIPDB_API_KEY = os.getenv("ABUSEIPDB_API_KEY")
+VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY")
 
-# Hardcoded rule IDs to avoid rate-limiting on a full scan
+# Monitored rule IDs
 MONITORED_RULE_IDS = [
     "ru_41baf103-99d9-46cf-8bd7-d2bb3841f8f2",
     "ru_67b85d9f-b743-4ab5-84bc-b4004b2f133c",
@@ -43,11 +44,13 @@ MONITORED_RULE_IDS = [
     "ru_828e8fe8-d4ee-49cf-a934-ae3e0bcf037a"
 ]
 
+# --- Global Rule Metadata Cache ---
+RULE_METADATA_CACHE = {}
+
 # --- Database Models ---
 class Incident(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(255), nullable=False)
-    # New columns for robust correlation
     correlation_key = db.Column(db.String(255), nullable=True, unique=False)
     detection_date = db.Column(db.Date, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
@@ -140,21 +143,58 @@ def extract_user_id(log_data: dict) -> Optional[str]:
 
     return None
 
-def extract_ips(log_data: dict) -> list:
+def extract_ips(log_data: dict) -> set:
     """Safely extracts all unique IP addresses from nested UDM log data."""
     ips = set()
     if not log_data or not isinstance(log_data, dict):
-        return []
+        return ips
     
-    principal_asset_ips = log_data.get('principal', {}).get('asset', {}).get('ip', [])
-    principal_ips = log_data.get('principal', {}).get('ip', [])
-    target_ips = log_data.get('target', {}).get('ip', [])
+    ip_lists = [
+        log_data.get('principal', {}).get('asset', {}).get('ip', []),
+        log_data.get('principal', {}).get('ip', []),
+        log_data.get('target', {}).get('ip', []),
+    ]
 
-    ips.update(principal_asset_ips)
-    ips.update(principal_ips)
-    ips.update(target_ips)
+    for ip_list in ip_lists:
+        ips.update(ip_list)
     
-    return list(ips)
+    return ips
+
+def extract_domains(log_data: dict) -> set:
+    """Safely extracts domains from nested UDM log data."""
+    domains = set()
+    if not log_data or not isinstance(log_data, dict):
+        return domains
+    
+    domains.update(log_data.get('network', {}).get('dns', {}).get('questions', [{}])[0].get('name', []))
+    domains.update(log_data.get('network', {}).get('http', {}).get('host', []))
+    
+    return domains
+
+def extract_files(log_data: dict) -> set:
+    """Safely extracts file hashes from nested UDM log data."""
+    files = set()
+    if not log_data or not isinstance(log_data, dict):
+        return files
+
+    file_objects = [log_data.get('principal', {}).get('file'), log_data.get('target', {}).get('file')]
+    for file_obj in file_objects:
+        if file_obj and isinstance(file_obj, dict):
+            files.update(file_obj.get('sha256', []))
+            files.update(file_obj.get('md5', []))
+            files.update(file_obj.get('sha1', []))
+    
+    return files
+
+def extract_urls(log_data: dict) -> set:
+    """Safely extracts URLs from nested UDM log data."""
+    urls = set()
+    if not log_data or not isinstance(log_data, dict):
+        return urls
+    
+    urls.update(log_data.get('network', {}).get('http', {}).get('url', []))
+    return urls
+
 
 def extract_ips_from_udm_logs(logs) -> set:
     """Extracts all unique IPs from a list of UDM logs or a single log."""
@@ -176,35 +216,86 @@ def extract_ips_from_udm_logs(logs) -> set:
     
     return ips
 
-def get_ip_threat_intel(ip_address: str) -> Optional[dict]:
-    """Fetches threat intelligence for an IP from AbuseIPDB."""
-    if not ABUSEIPDB_API_KEY:
-        print("AbuseIPDB API key not found. Skipping threat intel.")
+def get_virustotal_report(indicator: str) -> Optional[dict]:
+    """Fetches threat intelligence for an indicator from VirusTotal."""
+    if not VIRUSTOTAL_API_KEY:
+        print("VirusTotal API key not found. Skipping threat intel.")
         return None
         
-    url = "https://api.abuseipdb.com/api/v2/check"
+    vt_url = "https://www.virustotal.com/api/v3/"
+    endpoint = ""
+    
+    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", indicator):
+        endpoint = "ip_addresses/"
+    elif re.match(r"^[a-f0-9]{64}$", indicator):
+        endpoint = "files/"
+    elif re.match(r"^[a-f0-9]{40}$", indicator):
+        endpoint = "files/"
+    elif re.match(r"^[a-f0-9]{32}$", indicator):
+        endpoint = "files/"
+    elif "." in indicator:
+        endpoint = "domains/"
+    elif "http" in indicator:
+        import base64
+        encoded_url = base64.urlsafe_b64encode(indicator.encode()).decode().strip("=")
+        endpoint = f"urls/{encoded_url}"
+    else:
+        return None
+        
+    url = f"{vt_url}{endpoint}{indicator}"
     headers = {
-        "Accept": "application/json",
-        "Key": ABUSEIPDB_API_KEY
-    }
-    params = {
-        "ipAddress": ip_address,
-        "maxAgeInDays": 90
+        "x-apikey": VIRUSTOTAL_API_KEY
     }
     
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
-        return response.json().get("data")
+        
+        # Correctly navigate the JSON response
+        report_data = response.json().get("data")
+        if report_data and isinstance(report_data, dict):
+            # The stats are nested under 'attributes'
+            return report_data.get('attributes')
+        return None
     except requests.exceptions.HTTPError as e:
-        print(f"HTTP Error fetching AbuseIPDB data for {ip_address}: {e.response.text}", file=sys.stderr)
+        print(f"HTTP Error fetching VirusTotal data for {indicator}: {e.response.text}", file=sys.stderr)
         return None
     except Exception as e:
-        print(f"An unexpected error occurred during AbuseIPDB query for {ip_address}: {e}", file=sys.stderr)
+        print(f"An unexpected error occurred during VirusTotal query for {indicator}: {e}", file=sys.stderr)
         return None
+
+def generate_incident_title(raw_logs: str) -> str:
+    """Generates a descriptive title for an incident using Gemini AI."""
+    title_prompt = (
+        f"Generate a concise and descriptive title (max 10 words) for a security incident based on the following raw logs. "
+        f"Do not include the word 'incident' in the title. Focus on the core event and affected entities."
+        f"Logs:\n\n{raw_logs}"
+    )
+
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": title_prompt}]}],
+        "system_instruction": {"parts": [{"text": "You are an AI assistant that generates concise security incident titles."}]}
+    }
+
+    try:
+        response = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", headers=headers, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        title = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Uncategorized Detections').strip()
+        if title.startswith('"') and title.endswith('"'):
+            title = title[1:-1]
+        return title
+    except Exception as e:
+        print(f"Error generating title with Gemini: {e}", file=sys.stderr)
+        return "Uncategorized Detections"
+
 
 def correlate_detections_into_incidents(detections):
     """Correlates new detections and groups them into incidents based on user ID and same date."""
+    
+    # In-memory dictionary to group detections before writing to DB
+    groups = {}
     
     for det in detections:
         log_data = det.get('collectionElements', [{}])[0].get('references', [{}])[0].get('event', {})
@@ -218,14 +309,27 @@ def correlate_detections_into_incidents(detections):
             detection_date = datetime.date.today()
 
         if user_id:
-            # Check for an existing incident for this user on this date
-            existing_incident = Incident.query.filter_by(
-                correlation_key=user_id,
-                detection_date=detection_date
-            ).first()
+            correlation_key = user_id
+        else:
+            correlation_key = det.get('id')
+        
+        correlation_tuple = (correlation_key, detection_date)
+        
+        if correlation_tuple not in groups:
+            groups[correlation_tuple] = []
+        
+        groups[correlation_tuple].append(det)
 
-            if existing_incident:
-                # If the detection is not already part of the incident, add it
+    for key, group_detections in groups.items():
+        correlation_key, detection_date = key
+        
+        existing_incident = Incident.query.filter_by(
+            correlation_key=correlation_key,
+            detection_date=detection_date
+        ).first()
+
+        if existing_incident:
+            for det in group_detections:
                 if not IncidentDetection.query.filter_by(detection_id=det.get('id')).first():
                     incident_detection = IncidentDetection(
                         incident_id=existing_incident.id,
@@ -233,42 +337,26 @@ def correlate_detections_into_incidents(detections):
                         raw_data=json.dumps(det)
                     )
                     db.session.add(incident_detection)
-            else:
-                # Create a new incident if none exists
-                title = f"Incident: Detections for User {user_id} on {detection_date.isoformat()}"
-                new_incident = Incident(
-                    title=title,
-                    correlation_key=user_id,
-                    detection_date=detection_date
-                )
-                db.session.add(new_incident)
-                db.session.commit() # Commit to get the new incident ID
-                
-                incident_detection = IncidentDetection(
-                    incident_id=new_incident.id,
-                    detection_id=det.get('id'),
-                    raw_data=json.dumps(det)
-                )
-                db.session.add(incident_detection)
         else:
-            # Handle detections without a user_id as individual uncategorized incidents
-            if not IncidentDetection.query.filter_by(detection_id=det.get('id')).first():
-                title = f"Incident: Uncategorized Detection {det.get('id')} on {detection_date.isoformat()}"
-                new_incident = Incident(
-                    title=title,
-                    correlation_key=det.get('id'),
-                    detection_date=detection_date
-                )
-                db.session.add(new_incident)
-                db.session.commit()
-                
+            raw_log_string = json.dumps([det.get('collectionElements') for det in group_detections], indent=2)
+            generated_title = "Incident: " + generate_incident_title(raw_log_string)
+            
+            new_incident = Incident(
+                title=generated_title,
+                correlation_key=correlation_key,
+                detection_date=detection_date
+            )
+            db.session.add(new_incident)
+            db.session.flush()
+            
+            for det in group_detections:
                 incident_detection = IncidentDetection(
                     incident_id=new_incident.id,
                     detection_id=det.get('id'),
                     raw_data=json.dumps(det)
                 )
                 db.session.add(incident_detection)
-        
+    
     db.session.commit()
     return
 
@@ -367,9 +455,11 @@ def chat():
             return jsonify({"error": "Prompt is required"}), 400
 
         chat_history = []
-        threat_intel_reports = {}
         all_logs_string = ""
         all_ips = set()
+        all_domains = set()
+        all_hashes = set()
+        all_urls = set()
         
         if incident_id:
             incident = Incident.query.get_or_404(incident_id)
@@ -381,6 +471,9 @@ def chat():
                 
                 log_event_data = raw_log_data.get('collectionElements', [{}])[0].get('references', [{}])[0].get('event', {})
                 all_ips.update(extract_ips(log_event_data))
+                all_domains.update(extract_domains(log_event_data))
+                all_hashes.update(extract_files(log_event_data))
+                all_urls.update(extract_urls(log_event_data))
 
             history = ChatMessage.query.filter_by(incident_id=incident_id).order_by(ChatMessage.timestamp).all()
             chat_history.append({"role": "user", "parts": [{"text": f"Raw Logs for Incident Analysis:\n\n{all_logs_string}\n\n"}]})
@@ -394,36 +487,52 @@ def chat():
                 
             try:
                 logs_data = json.loads(logs)
-                all_ips.update(extract_ips_from_udm_logs(logs_data))
+                for log in logs_data:
+                    log_event = log.get('references', [{}])[0].get('event', {})
+                    all_ips.update(extract_ips(log_event))
+                    all_domains.update(extract_domains(log_event))
+                    all_hashes.update(extract_files(log_event))
+                    all_urls.update(extract_urls(log_event))
+
                 all_logs_string = json.dumps(logs_data, indent=2)
             except json.JSONDecodeError:
                 all_logs_string = logs
                 
             chat_history.append({"role": "user", "parts": [{"text": f"Raw Logs for Ad-Hoc Analysis:\n\n{all_logs_string}\n\n"}]})
             chat_history.append({"role": "model", "parts": [{"text": "I have received the ad-hoc logs. How can I help you analyze them?"}]})
-            
-        for ip in all_ips:
-            report = get_ip_threat_intel(ip)
-            if report:
-                threat_intel_reports[ip] = report
+        
+        threat_intel_prompt = ""
+        indicators = {"IP": all_ips, "Domain": all_domains, "File Hash": all_hashes, "URL": all_urls}
 
-        if threat_intel_reports:
-            threat_intel_prompt = "\n\nThreat Intelligence Reports:\n\n"
-            for ip, report in threat_intel_reports.items():
-                is_public = "Public" if report.get("isPublic") else "Private"
-                hostnames = ", ".join(report.get("hostnames", ["N/A"]))
-                threat_intel_prompt += f"IP Address: {ip} ({is_public})\n"
-                threat_intel_prompt += f"  Abuse Confidence Score: {report.get('abuseConfidenceScore', 'N/A')}\n"
-                threat_intel_prompt += f"  Country: {report.get('countryCode', 'N/A')}\n"
-                threat_intel_prompt += f"  Hostnames: {hostnames}\n"
-                threat_intel_prompt += f"  ISP: {report.get('isp', 'N/A')}\n"
-                threat_intel_prompt += "  Recent Reports:\n"
-                for r in report.get("reports", []):
-                    threat_intel_prompt += f"    - Comment: {r.get('comment', 'N/A')}\n"
-                    threat_intel_prompt += f"      Categories: {r.get('categories', [])}\n"
-                    threat_intel_prompt += f"      Report Date: {r.get('reportedAt', 'N/A')}\n"
-                threat_intel_prompt += "\n"
+        for indicator_type, indicator_set in indicators.items():
+            if indicator_set:
+                threat_intel_prompt += f"\n\nVirusTotal Reports for {indicator_type}s:\n"
+                for indicator in indicator_set:
+                    report = get_virustotal_report(indicator)
+                    if report:
+                        stats = report.get('last_analysis_stats', {})
+                        malicious = stats.get('malicious', 0)
+                        harmless = stats.get('harmless', 0)
+                        
+                        threat_intel_prompt += f"  - {indicator_type}: {indicator}\n"
+                        threat_intel_prompt += f"    Status: Malicious ({malicious}), Harmless ({harmless})\n"
+                        
+                        if malicious > 0:
+                            threat_intel_prompt += "    *This indicator is considered malicious.*\n"
+                            
+                            # Add specific vendor findings to the prompt for more context
+                            vendor_findings = report.get('last_analysis_results', {})
+                            if vendor_findings:
+                                threat_intel_prompt += "    Specific Vendor Findings:\n"
+                                for vendor, data in vendor_findings.items():
+                                    if data.get('category') == 'malicious' or data.get('category') == 'suspicious':
+                                        threat_intel_prompt += f"      - {vendor}: {data.get('result')}\n"
+                        else:
+                            threat_intel_prompt += "    *This indicator appears to be clean.*\n"
+        
+        if threat_intel_prompt:
             chat_history.append({"role": "user", "parts": [{"text": threat_intel_prompt}]})
+
 
         chat_history.append({"role": "user", "parts": [{"text": prompt}]})
 
@@ -470,7 +579,22 @@ def get_chat_history(incident_id):
     history_list = [msg.to_dict() for msg in history]
     return jsonify(history_list)
 
+def setup_rule_cache():
+    global RULE_METADATA_CACHE
+    credentials_file = os.path.join(os.path.dirname(__file__), "nfr4-backstory.json")
+    region = os.getenv("CHRONICLE_REGION", "us")
+    
+    try:
+        rules = get_all_rules_by_ids(credentials_file, region, MONITORED_RULE_IDS)
+        for rule in rules:
+            if 'ruleName' in rule and 'ruleDetails' in rule:
+                RULE_METADATA_CACHE[rule['ruleName']] = rule['ruleDetails']
+    except Exception as e:
+        print(f"Failed to populate rule cache: {e}", file=sys.stderr)
+
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
+        setup_rule_cache()
     app.run(debug=True)
