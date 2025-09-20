@@ -33,18 +33,23 @@ CHRONICLE_REGION = os.getenv("CHRONICLE_REGION", "us")
 UDM_API_BASE_URL = "https://backstory.googleapis.com"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ABUSEIPDB_API_KEY = os.getenv("ABUSEIPDB_API_KEY")
 
 # Hardcoded rule IDs to avoid rate-limiting on a full scan
 MONITORED_RULE_IDS = [
     "ru_41baf103-99d9-46cf-8bd7-d2bb3841f8f2",
     "ru_67b85d9f-b743-4ab5-84bc-b4004b2f133c",
-    "ru_545584c3-3a45-4b9b-a1bb-dcea39f3bfdb"
+    "ru_545584c3-3a45-4b9b-a1bb-dcea39f3bfdb",
+    "ru_828e8fe8-d4ee-49cf-a934-ae3e0bcf037a"
 ]
 
 # --- Database Models ---
 class Incident(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(255), nullable=False)
+    # New columns for robust correlation
+    correlation_key = db.Column(db.String(255), nullable=True, unique=False)
+    detection_date = db.Column(db.Date, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     detections = db.relationship('IncidentDetection', backref='incident', lazy=True)
     
@@ -135,71 +140,154 @@ def extract_user_id(log_data: dict) -> Optional[str]:
 
     return None
 
-def correlate_detections_into_incidents(detections):
-    """Correlates new detections and groups them into incidents based solely on the user ID."""
-    incidents = []
+def extract_ips(log_data: dict) -> list:
+    """Safely extracts all unique IP addresses from nested UDM log data."""
+    ips = set()
+    if not log_data or not isinstance(log_data, dict):
+        return []
     
-    # Correlation logic: group by user ID
-    groups = {}
+    principal_asset_ips = log_data.get('principal', {}).get('asset', {}).get('ip', [])
+    principal_ips = log_data.get('principal', {}).get('ip', [])
+    target_ips = log_data.get('target', {}).get('ip', [])
+
+    ips.update(principal_asset_ips)
+    ips.update(principal_ips)
+    ips.update(target_ips)
+    
+    return list(ips)
+
+def extract_ips_from_udm_logs(logs) -> set:
+    """Extracts all unique IPs from a list of UDM logs or a single log."""
+    ips = set()
+    
+    if not logs:
+        return ips
+    
+    if isinstance(logs, dict):
+        event = logs.get('events', [{}])[0]
+        ips.update(extract_ips(event))
+    elif isinstance(logs, list):
+        for log in logs:
+            if isinstance(log, dict) and 'principal' in log:
+                ips.update(extract_ips(log))
+            elif isinstance(log, dict) and 'references' in log:
+                event = log.get('references', [{}])[0].get('event', {})
+                ips.update(extract_ips(event))
+    
+    return ips
+
+def get_ip_threat_intel(ip_address: str) -> Optional[dict]:
+    """Fetches threat intelligence for an IP from AbuseIPDB."""
+    if not ABUSEIPDB_API_KEY:
+        print("AbuseIPDB API key not found. Skipping threat intel.")
+        return None
+        
+    url = "https://api.abuseipdb.com/api/v2/check"
+    headers = {
+        "Accept": "application/json",
+        "Key": ABUSEIPDB_API_KEY
+    }
+    params = {
+        "ipAddress": ip_address,
+        "maxAgeInDays": 90
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json().get("data")
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP Error fetching AbuseIPDB data for {ip_address}: {e.response.text}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred during AbuseIPDB query for {ip_address}: {e}", file=sys.stderr)
+        return None
+
+def correlate_detections_into_incidents(detections):
+    """Correlates new detections and groups them into incidents based on user ID and same date."""
+    
     for det in detections:
         log_data = det.get('collectionElements', [{}])[0].get('references', [{}])[0].get('event', {})
         
-        # Reliably get the correlation key (the userid)
-        correlation_key = extract_user_id(log_data)
+        user_id = extract_user_id(log_data)
         
-        # If no user ID is found, use a unique key to prevent incorrect grouping
-        if not correlation_key:
-            correlation_key = det.get('id')
+        try:
+            detection_timestamp = datetime.datetime.fromisoformat(det.get('detectionTime', '').replace('Z', '+00:00'))
+            detection_date = detection_timestamp.date()
+        except (ValueError, TypeError):
+            detection_date = datetime.date.today()
 
-        if correlation_key not in groups:
-            groups[correlation_key] = []
-        groups[correlation_key].append(det)
+        if user_id:
+            # Check for an existing incident for this user on this date
+            existing_incident = Incident.query.filter_by(
+                correlation_key=user_id,
+                detection_date=detection_date
+            ).first()
 
-    for key, group_detections in groups.items():
-        existing_incident = None
-        # Check for existing incident by the first detection's ID
-        first_det_id = group_detections[0].get('id')
-        incident_detection = IncidentDetection.query.filter_by(detection_id=first_det_id).first()
-        if incident_detection:
-            existing_incident = incident_detection.incident
-        
-        if existing_incident:
-            incident = existing_incident
-        else:
-            # Dynamically set the title based on the correlation key
-            if "de_" in key:
-                title = f"Incident: Uncategorized Detection {key}"
+            if existing_incident:
+                # If the detection is not already part of the incident, add it
+                if not IncidentDetection.query.filter_by(detection_id=det.get('id')).first():
+                    incident_detection = IncidentDetection(
+                        incident_id=existing_incident.id,
+                        detection_id=det.get('id'),
+                        raw_data=json.dumps(det)
+                    )
+                    db.session.add(incident_detection)
             else:
-                title = f"Incident: Detections for User {key}"
-            
-            incident = Incident(title=title)
-            db.session.add(incident)
-            db.session.commit()
-            
-        # Link detections to the incident
-        for det in group_detections:
-            if not IncidentDetection.query.filter_by(detection_id=det.get('id')).first():
+                # Create a new incident if none exists
+                title = f"Incident: Detections for User {user_id} on {detection_date.isoformat()}"
+                new_incident = Incident(
+                    title=title,
+                    correlation_key=user_id,
+                    detection_date=detection_date
+                )
+                db.session.add(new_incident)
+                db.session.commit() # Commit to get the new incident ID
+                
                 incident_detection = IncidentDetection(
-                    incident_id=incident.id,
+                    incident_id=new_incident.id,
                     detection_id=det.get('id'),
                     raw_data=json.dumps(det)
                 )
                 db.session.add(incident_detection)
-        db.session.commit()
-        incidents.append(incident)
+        else:
+            # Handle detections without a user_id as individual uncategorized incidents
+            if not IncidentDetection.query.filter_by(detection_id=det.get('id')).first():
+                title = f"Incident: Uncategorized Detection {det.get('id')} on {detection_date.isoformat()}"
+                new_incident = Incident(
+                    title=title,
+                    correlation_key=det.get('id'),
+                    detection_date=detection_date
+                )
+                db.session.add(new_incident)
+                db.session.commit()
+                
+                incident_detection = IncidentDetection(
+                    incident_id=new_incident.id,
+                    detection_id=det.get('id'),
+                    raw_data=json.dumps(det)
+                )
+                db.session.add(incident_detection)
         
-    return incidents
+    db.session.commit()
+    return
 
 @app.route("/")
 def dashboard():
     """Renders the main dashboard, listing all incidents."""
     try:
-        # Fetch detections for monitored rules and create/update incidents
-        end_time_obj = datetime.datetime.now(datetime.timezone.utc)
-        start_time_obj = end_time_obj - datetime.timedelta(hours=24)
-        start_time_iso = start_time_obj.isoformat(timespec='seconds').replace('+00:00', 'Z')
-        end_time_iso = end_time_obj.isoformat(timespec='seconds').replace('+00:00', 'Z')
+        start_time_str = request.args.get("start_time")
+        end_time_str = request.args.get("end_time")
         
+        if not start_time_str or not end_time_str:
+            end_time_obj = datetime.datetime.now(datetime.timezone.utc)
+            start_time_obj = end_time_obj - datetime.timedelta(hours=24)
+            start_time_str = start_time_obj.strftime("%Y-%m-%dT%H:%M")
+            end_time_str = end_time_obj.strftime("%Y-%m-%dT%H:%M")
+        
+        start_time_iso = format_to_chronicle_time(start_time_str)
+        end_time_iso = format_to_chronicle_time(end_time_str)
+
         all_new_detections = []
         for version_id in MONITORED_RULE_IDS:
             detections, _ = get_detections_for_rule(
@@ -215,9 +303,13 @@ def dashboard():
         
         correlate_detections_into_incidents(all_new_detections)
 
-        # Now, fetch all incidents to display on the dashboard
         incidents = Incident.query.order_by(Incident.created_at.desc()).all()
-        return render_template("dashboard.html", incidents=incidents)
+        return render_template(
+            "dashboard.html", 
+            incidents=incidents, 
+            start_time=start_time_str, 
+            end_time=end_time_str
+        )
     except Exception as e:
         return f"An error occurred: {e}", 500
 
@@ -225,7 +317,6 @@ def dashboard():
 def incident_details(incident_id):
     """Renders the details page for a specific incident."""
     incident = Incident.query.get_or_404(incident_id)
-    # Get the raw detection data for this incident
     detections_raw = [json.loads(d.raw_data) for d in incident.detections]
     
     return render_template(
@@ -263,8 +354,6 @@ def api_udm_search():
     except Exception as e:
         return jsonify({"error": f"UDM Search failed: {str(e)}"}), 500
 
-# In app.py, replace the existing chat() function with this one
-
 @app.route("/api/chat", methods=["POST"])
 def chat():
     """Handles the Gemini chat request for log analysis."""
@@ -272,33 +361,69 @@ def chat():
         data = request.json
         prompt = data.get("prompt")
         incident_id = data.get("incident_id")
-        logs = data.get("logs") # This is a new field to handle ad-hoc logs
+        logs = data.get("logs")
         
         if not prompt:
             return jsonify({"error": "Prompt is required"}), 400
 
         chat_history = []
+        threat_intel_reports = {}
+        all_logs_string = ""
+        all_ips = set()
         
         if incident_id:
-            # Logic for Incident-based chat (existing functionality)
             incident = Incident.query.get_or_404(incident_id)
-            all_logs_string = ""
             for detection_link in incident.detections:
+                raw_log_data = json.loads(detection_link.raw_data)
                 all_logs_string += f"--- Detection ID: {detection_link.detection_id} ---\n"
-                all_logs_string += json.dumps(json.loads(detection_link.raw_data), indent=2)
+                all_logs_string += json.dumps(raw_log_data, indent=2)
                 all_logs_string += "\n\n"
+                
+                log_event_data = raw_log_data.get('collectionElements', [{}])[0].get('references', [{}])[0].get('event', {})
+                all_ips.update(extract_ips(log_event_data))
 
             history = ChatMessage.query.filter_by(incident_id=incident_id).order_by(ChatMessage.timestamp).all()
             chat_history.append({"role": "user", "parts": [{"text": f"Raw Logs for Incident Analysis:\n\n{all_logs_string}\n\n"}]})
             chat_history.append({"role": "model", "parts": [{"text": "I have received the logs. How can I help you analyze them?"}]})
             for msg in history:
                 chat_history.append({"role": "user" if msg.sender == 'user' else 'model', "parts": [{"text": msg.message}]})
+                
         else:
-            # Logic for ad-hoc UDM search (new functionality)
             if not logs:
                 return jsonify({"error": "Logs are required for ad-hoc analysis"}), 400
-            chat_history.append({"role": "user", "parts": [{"text": f"Raw Logs for Ad-Hoc Analysis:\n\n{logs}\n\n"}]})
+                
+            try:
+                logs_data = json.loads(logs)
+                all_ips.update(extract_ips_from_udm_logs(logs_data))
+                all_logs_string = json.dumps(logs_data, indent=2)
+            except json.JSONDecodeError:
+                all_logs_string = logs
+                
+            chat_history.append({"role": "user", "parts": [{"text": f"Raw Logs for Ad-Hoc Analysis:\n\n{all_logs_string}\n\n"}]})
             chat_history.append({"role": "model", "parts": [{"text": "I have received the ad-hoc logs. How can I help you analyze them?"}]})
+            
+        for ip in all_ips:
+            report = get_ip_threat_intel(ip)
+            if report:
+                threat_intel_reports[ip] = report
+
+        if threat_intel_reports:
+            threat_intel_prompt = "\n\nThreat Intelligence Reports:\n\n"
+            for ip, report in threat_intel_reports.items():
+                is_public = "Public" if report.get("isPublic") else "Private"
+                hostnames = ", ".join(report.get("hostnames", ["N/A"]))
+                threat_intel_prompt += f"IP Address: {ip} ({is_public})\n"
+                threat_intel_prompt += f"  Abuse Confidence Score: {report.get('abuseConfidenceScore', 'N/A')}\n"
+                threat_intel_prompt += f"  Country: {report.get('countryCode', 'N/A')}\n"
+                threat_intel_prompt += f"  Hostnames: {hostnames}\n"
+                threat_intel_prompt += f"  ISP: {report.get('isp', 'N/A')}\n"
+                threat_intel_prompt += "  Recent Reports:\n"
+                for r in report.get("reports", []):
+                    threat_intel_prompt += f"    - Comment: {r.get('comment', 'N/A')}\n"
+                    threat_intel_prompt += f"      Categories: {r.get('categories', [])}\n"
+                    threat_intel_prompt += f"      Report Date: {r.get('reportedAt', 'N/A')}\n"
+                threat_intel_prompt += "\n"
+            chat_history.append({"role": "user", "parts": [{"text": threat_intel_prompt}]})
 
         chat_history.append({"role": "user", "parts": [{"text": prompt}]})
 
@@ -306,7 +431,7 @@ def chat():
             return jsonify({"error": "Gemini API key not found."}), 500
         
         system_instruction_payload = {
-            "parts": [{ "text": "You are a world-class cybersecurity analyst. Your task is to analyze raw logs provided by the user and respond to their questions based on those logs. Explain your findings in a clear, concise, and professional manner. You must reference specific keys and values from the logs in your analysis." }]
+            "parts": [{ "text": "You are a world-class cybersecurity analyst. Your task is to analyze raw logs and threat intelligence reports provided by the user. Explain your findings in a clear, concise, and professional manner. You must reference specific keys and values from the logs and the threat intelligence reports in your analysis." }]
         }
 
         payload = {
@@ -324,7 +449,6 @@ def chat():
         result = response.json()
         generated_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'No response from AI.')
 
-        # Only save messages to the database if an incident ID is present
         if incident_id:
             user_msg = ChatMessage(incident_id=incident_id, sender='user', message=prompt)
             ai_msg = ChatMessage(incident_id=incident_id, sender='ai', message=generated_text)
