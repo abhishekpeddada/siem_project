@@ -133,16 +133,10 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         const STORAGE_KEY = 'udmChatHistory';
-        const LOGS_STORAGE_KEY = 'lastFetchedLogs';
-        
+        let lastFetchedLogs = null;
+
         document.addEventListener('DOMContentLoaded', () => {
             loadChatHistory();
-            const lastFetchedLogs = localStorage.getItem(LOGS_STORAGE_KEY);
-            if (lastFetchedLogs) {
-                // Re-enable chat input and button if logs are present
-                document.getElementById('chat-input').disabled = false;
-                document.querySelector('.input-group button').disabled = false;
-            }
         });
 
         function loadChatHistory() {
@@ -167,10 +161,7 @@
 
         function clearChatHistory() {
             localStorage.removeItem(STORAGE_KEY);
-            localStorage.removeItem(LOGS_STORAGE_KEY);
             loadChatHistory();
-            document.getElementById('chat-input').disabled = true;
-            document.querySelector('.input-group button').disabled = true;
         }
 
         function saveMessage(sender, message) {
@@ -208,12 +199,12 @@
             
             const udmStartTimeIso = convertToIsoFormat(udmStartTime);
             const udmEndTimeIso = convertToIsoFormat(udmEndTime);
-
+    
             if (!udmStartTimeIso || !udmEndTimeIso) {
                 resultsDiv.innerHTML = `<span style="color: red;">Invalid date format. Please check the start and end times.</span>`;
                 return;
             }
-
+    
             resultsDiv.innerHTML = `<p>Searching UDM logs...</p>`;
             chatBoxElement.innerHTML = `<div class="ai-loading chat-bubble">Searching UDM logs...</div>`;
             
@@ -229,17 +220,14 @@
                     }),
                 });
                 const data = await response.json();
-
+    
                 if (data.error) {
                     resultsDiv.innerHTML = `<span style="color: red;">UDM Search failed: ${data.error}</span>`;
                     chatBoxElement.innerHTML = `<span style="color: red;">UDM Search failed: ${data.error}</span>`;
                 } else {
-                    const logsToStore = JSON.stringify(data.logs, null, 2);
-                    localStorage.setItem(LOGS_STORAGE_KEY, logsToStore);
-                    
-                    resultsDiv.innerHTML = `<pre>${logsToStore}</pre>`;
-                    sendToChatApi("Please analyze the following UDM logs and provide a summary of the activity found.", logsToStore);
-                    
+                    lastFetchedLogs = JSON.stringify(data.logs, null, 2);
+                    resultsDiv.innerHTML = `<pre>${lastFetchedLogs}</pre>`;
+                    sendToChatApi("Please analyze the following UDM logs and provide a summary of the activity found.", lastFetchedLogs);
                     document.getElementById('chat-input').disabled = false;
                     document.querySelector('.input-group button').disabled = false;
                 }
@@ -252,15 +240,9 @@
         function sendMessage() {
             const inputElement = document.getElementById('chat-input');
             const userPrompt = inputElement.value;
-            if (!userPrompt) return;
+            if (!userPrompt || !lastFetchedLogs) return;
             
-            const logsToAnalyze = localStorage.getItem(LOGS_STORAGE_KEY);
-            if (!logsToAnalyze) {
-                alert("Please perform a UDM search first.");
-                return;
-            }
-            
-            sendToChatApi(userPrompt, logsToAnalyze);
+            sendToChatApi(userPrompt, lastFetchedLogs);
             inputElement.value = "";
         }
     

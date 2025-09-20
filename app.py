@@ -194,20 +194,12 @@ def correlate_detections_into_incidents(detections):
 def dashboard():
     """Renders the main dashboard, listing all incidents."""
     try:
-        # Get time parameters from the request, or use a default
-        start_time_str = request.args.get("start_time")
-        end_time_str = request.args.get("end_time")
-        
-        if not start_time_str or not end_time_str:
-            end_time_obj = datetime.datetime.now(datetime.timezone.utc)
-            start_time_obj = end_time_obj - datetime.timedelta(hours=24)
-            start_time_str = start_time_obj.strftime("%Y-%m-%dT%H:%M")
-            end_time_str = end_time_obj.strftime("%Y-%m-%dT%H:%M")
-        
-        start_time_iso = format_to_chronicle_time(start_time_str)
-        end_time_iso = format_to_chronicle_time(end_time_str)
-
         # Fetch detections for monitored rules and create/update incidents
+        end_time_obj = datetime.datetime.now(datetime.timezone.utc)
+        start_time_obj = end_time_obj - datetime.timedelta(hours=24)
+        start_time_iso = start_time_obj.isoformat(timespec='seconds').replace('+00:00', 'Z')
+        end_time_iso = end_time_obj.isoformat(timespec='seconds').replace('+00:00', 'Z')
+        
         all_new_detections = []
         for version_id in MONITORED_RULE_IDS:
             detections, _ = get_detections_for_rule(
@@ -225,12 +217,7 @@ def dashboard():
 
         # Now, fetch all incidents to display on the dashboard
         incidents = Incident.query.order_by(Incident.created_at.desc()).all()
-        return render_template(
-            "dashboard.html", 
-            incidents=incidents, 
-            start_time=start_time_str, 
-            end_time=end_time_str
-        )
+        return render_template("dashboard.html", incidents=incidents)
     except Exception as e:
         return f"An error occurred: {e}", 500
 
@@ -276,6 +263,8 @@ def api_udm_search():
     except Exception as e:
         return jsonify({"error": f"UDM Search failed: {str(e)}"}), 500
 
+# In app.py, replace the existing chat() function with this one
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
     """Handles the Gemini chat request for log analysis."""
@@ -283,7 +272,7 @@ def chat():
         data = request.json
         prompt = data.get("prompt")
         incident_id = data.get("incident_id")
-        logs = data.get("logs")
+        logs = data.get("logs") # This is a new field to handle ad-hoc logs
         
         if not prompt:
             return jsonify({"error": "Prompt is required"}), 400
@@ -291,6 +280,7 @@ def chat():
         chat_history = []
         
         if incident_id:
+            # Logic for Incident-based chat (existing functionality)
             incident = Incident.query.get_or_404(incident_id)
             all_logs_string = ""
             for detection_link in incident.detections:
@@ -304,6 +294,7 @@ def chat():
             for msg in history:
                 chat_history.append({"role": "user" if msg.sender == 'user' else 'model', "parts": [{"text": msg.message}]})
         else:
+            # Logic for ad-hoc UDM search (new functionality)
             if not logs:
                 return jsonify({"error": "Logs are required for ad-hoc analysis"}), 400
             chat_history.append({"role": "user", "parts": [{"text": f"Raw Logs for Ad-Hoc Analysis:\n\n{logs}\n\n"}]})
@@ -333,6 +324,7 @@ def chat():
         result = response.json()
         generated_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'No response from AI.')
 
+        # Only save messages to the database if an incident ID is present
         if incident_id:
             user_msg = ChatMessage(incident_id=incident_id, sender='user', message=prompt)
             ai_msg = ChatMessage(incident_id=incident_id, sender='ai', message=generated_text)
