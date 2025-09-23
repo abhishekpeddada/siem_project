@@ -38,10 +38,11 @@ VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY")
 
 # Monitored rule IDs
 MONITORED_RULE_IDS = [
-    "ru_41baf103-99d9-46cf-8bd7-d2bb3841f8f2",
     "ru_67b85d9f-b743-4ab5-84bc-b4004b2f133c",
     "ru_545584c3-3a45-4b9b-a1bb-dcea39f3bfdb",
-    "ru_828e8fe8-d4ee-49cf-a934-ae3e0bcf037a"
+    "ru_828e8fe8-d4ee-49cf-a934-ae3e0bcf037a",
+    "ru_6f3d5a1c-daf9-4055-b344-2be8dcc920ca",
+    "ru_c6bd19a0-0a6c-4939-b213-0d5437436d1a"
 ]
 
 # --- Global Rule Metadata Cache ---
@@ -426,7 +427,7 @@ def api_udm_search():
         query = data.get("query")
         start_time_str = data.get("start_time")
         end_time_str = data.get("end_time")
-        limit = int(data.get("limit", 100))
+        limit = int(data.get("limit", 1000))
 
         if not all([query, start_time_str, end_time_str]):
             return jsonify({"error": "Missing required fields"}), 400
@@ -487,12 +488,14 @@ def chat():
                 
             try:
                 logs_data = json.loads(logs)
-                for log in logs_data:
-                    log_event = log.get('references', [{}])[0].get('event', {})
-                    all_ips.update(extract_ips(log_event))
-                    all_domains.update(extract_domains(log_event))
-                    all_hashes.update(extract_files(log_event))
-                    all_urls.update(extract_urls(log_event))
+                log_events = logs_data.get('events', [])
+                for log_event in log_events:
+                    # Defensive check to prevent crash if log_event is not a dictionary
+                    if isinstance(log_event, dict):
+                        all_ips.update(extract_ips(log_event))
+                        all_domains.update(extract_domains(log_event))
+                        all_hashes.update(extract_files(log_event))
+                        all_urls.update(extract_urls(log_event))
 
                 all_logs_string = json.dumps(logs_data, indent=2)
             except json.JSONDecodeError:
@@ -520,7 +523,6 @@ def chat():
                         if malicious > 0:
                             threat_intel_prompt += "    *This indicator is considered malicious.*\n"
                             
-                            # Add specific vendor findings to the prompt for more context
                             vendor_findings = report.get('last_analysis_results', {})
                             if vendor_findings:
                                 threat_intel_prompt += "    Specific Vendor Findings:\n"

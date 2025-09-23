@@ -5,13 +5,34 @@
     <title>Chronicle Incidents Dashboard</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <style>
-        body { margin: 20px; }
+        body { 
+            margin: 20px; 
+            background-color: #282a2d; /* Dark background */
+            color: #ffffff; /* White text */
+        }
+        .table {
+            /* Removed alternating row background color */
+            --bs-table-bg: #3c3f44;
+            --bs-table-color: #ffffff;
+        }
+        .table-hover > tbody > tr:hover > td,
+        .table-hover > tbody > tr:hover > th {
+            background-color: #495057; /* Lighter gray on hover */
+        }
+        .form-control, .form-select {
+            background-color: #3c3f44; /* Dark input fields */
+            color: #ffffff; /* White text in inputs */
+            border-color: #495057;
+        }
+        .form-control::placeholder, .form-select option {
+            color: #aeb1b6; /* Lighter placeholder text */
+        }
     </style>
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
         <div class="container-fluid">
-            <a class="navbar-brand" href="/">Chronicle SOC</a>
+            <a class="navbar-brand" href="/">Auto DefendOps</a>
             <div class="collapse navbar-collapse">
                 <ul class="navbar-nav me-auto mb-2 mb-lg-0">
                     <li class="nav-item">
@@ -57,7 +78,7 @@
             <button class="btn btn-info" id="refreshButton">Start Auto-Refresh</button>
         </div>
         
-        <table class="table table-striped table-hover">
+        <table class="table">
             <thead>
                 <tr>
                     <th>Incident ID</th>
@@ -70,7 +91,7 @@
                 {% for incident in incidents %}
                 <tr>
                     <td>{{ incident.id }}</td>
-                    <td>{{ incident.title }}</td>
+                    <td class="truncated-title">{{ incident.title }}</td>
                     <td>{{ incident.created_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</td>
                     <td>
                         <a href="/incidents/{{ incident.id }}" class="btn btn-primary btn-sm">View Details</a>
